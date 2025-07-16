@@ -496,3 +496,86 @@ func min(a, b int64) int64 {
 	}
 	return b
 }
+
+// StreamChunkUploader 流式分块上传器
+type StreamChunkUploader struct {
+	file         model.FileStreamer
+	fileSize     int64
+	chunkSize    int64
+	chunkCount   int64
+	fileName     string
+	notionClient *NotionService
+	fileRecord   *File
+	db           interface{} // 使用 interface{} 避免导入 gorm
+	ctx          context.Context
+	progress     func(float64)
+}
+
+// Upload 执行流式分块上传
+func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
+	var chunks []FileChunk
+	var totalRead int64
+
+	for i := int64(0); i < s.chunkCount; i++ {
+		// 检查上下文是否被取消
+		select {
+		case <-s.ctx.Done():
+			return nil, s.ctx.Err()
+		default:
+		}
+
+		// 计算当前分块的大小
+		currentChunkSize := s.chunkSize
+		if totalRead+currentChunkSize > s.fileSize {
+			currentChunkSize = s.fileSize - totalRead
+		}
+
+		// 创建分块页面
+		chunkName := fmt.Sprintf("%s.chunk%d", s.fileName, i)
+		pageID, err := s.notionClient.CreateDatabasePage(chunkName)
+		if err != nil {
+			return nil, fmt.Errorf("创建分块页面失败: %v", err)
+		}
+
+		// 创建限制读取器，只读取当前分块的数据
+		chunkReader := io.LimitReader(s.file, currentChunkSize)
+
+		// 创建分块流
+		chunkStream := &ChunkFileStream{
+			Reader:   chunkReader,
+			name:     chunkName,
+			size:     currentChunkSize,
+			mimetype: s.file.GetMimetype(),
+			Closers:  utils.NewClosers(),
+		}
+
+		// 上传分块并计算进度
+		chunkProgress := func(percentage float64) {
+			totalProgress := (float64(i) + percentage/100.0) / float64(s.chunkCount) * 100.0
+			if s.progress != nil {
+				s.progress(totalProgress)
+			}
+		}
+
+		hash1, err := s.notionClient.UploadAndUpdateFilePut(chunkStream, pageID, chunkProgress)
+		if err != nil {
+			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
+		}
+
+		// 创建分块记录
+		chunk := FileChunk{
+			FileID:       s.fileRecord.ID,
+			ChunkIndex:   int(i),
+			ChunkSize:    currentChunkSize,
+			StartOffset:  totalRead,
+			EndOffset:    totalRead + currentChunkSize,
+			NotionPageID: pageID,
+			SHA1:         hash1,
+		}
+		chunks = append(chunks, chunk)
+
+		totalRead += currentChunkSize
+	}
+
+	return chunks, nil
+}

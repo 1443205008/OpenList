@@ -14,7 +14,6 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
-	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 )
@@ -497,21 +496,10 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 	}, nil
 }
 
-// putChunkedFile 上传分块文件（大于5GB）
+// putChunkedFile 上传分块文件（大于5GB）- 流式分块上传
 func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize int64, dirID int, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// 计算分块数量
 	chunkCount := (fileSize + MaxChunkSize - 1) / MaxChunkSize
-
-	// 缓存文件到临时文件以支持多次读取
-	tempFile, err := file.CacheFullInTempFile()
-	if err != nil {
-		return nil, fmt.Errorf("缓存文件失败: %v", err)
-	}
-	defer func() {
-		if closer, ok := tempFile.(io.Closer); ok {
-			closer.Close()
-		}
-	}()
 
 	// 创建主文件记录
 	f := &File{
@@ -525,58 +513,24 @@ func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize i
 		return nil, fmt.Errorf("创建文件记录失败: %v", err)
 	}
 
-	// 上传每个分块
-	var chunks []FileChunk
-	for i := int64(0); i < chunkCount; i++ {
-		if utils.IsCanceled(ctx) {
-			return nil, ctx.Err()
-		}
+	// 创建流式分块上传器
+	streamUploader := &StreamChunkUploader{
+		file:         file,
+		fileSize:     fileSize,
+		chunkSize:    MaxChunkSize,
+		chunkCount:   chunkCount,
+		fileName:     fileName,
+		notionClient: d.notionClient,
+		fileRecord:   f,
+		db:           d.db,
+		ctx:          ctx,
+		progress:     up,
+	}
 
-		startOffset := i * MaxChunkSize
-		endOffset := startOffset + MaxChunkSize
-		if endOffset > fileSize {
-			endOffset = fileSize
-		}
-		chunkSize := endOffset - startOffset
-
-		// 创建分块页面
-		chunkName := fmt.Sprintf("%s.chunk%d", fileName, i)
-		pageID, err := d.notionClient.CreateDatabasePage(chunkName)
-		if err != nil {
-			return nil, fmt.Errorf("创建分块页面失败: %v", err)
-		}
-
-		// 创建分块读取器
-		chunkReader := io.NewSectionReader(tempFile, startOffset, chunkSize)
-		chunkStream := &ChunkFileStream{
-			Reader:   chunkReader,
-			name:     chunkName,
-			size:     chunkSize,
-			mimetype: file.GetMimetype(),
-		}
-
-		// 上传分块
-		chunkProgress := func(percentage float64) {
-			totalProgress := (float64(i) + percentage/100.0) / float64(chunkCount) * 100.0
-			up(totalProgress)
-		}
-
-		hash1, err := d.notionClient.UploadAndUpdateFilePut(chunkStream, pageID, chunkProgress)
-		if err != nil {
-			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
-		}
-
-		// 创建分块记录
-		chunk := FileChunk{
-			FileID:       f.ID,
-			ChunkIndex:   int(i),
-			ChunkSize:    chunkSize,
-			StartOffset:  startOffset,
-			EndOffset:    endOffset,
-			NotionPageID: pageID,
-			SHA1:         hash1,
-		}
-		chunks = append(chunks, chunk)
+	// 执行流式分块上传
+	chunks, err := streamUploader.Upload()
+	if err != nil {
+		return nil, fmt.Errorf("流式分块上传失败: %v", err)
 	}
 
 	// 批量保存分块记录
