@@ -468,9 +468,16 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 	// 创建 SHA-1 哈希计算器
 	hash := sha1.New()
 	tee := io.TeeReader(file, hash)
-	progress := driver.NewProgress(file.GetSize(), up)
-	tee1 := io.TeeReader(tee, progress)
-	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee1)
+
+	// 创建进度跟踪器
+	var progress io.Writer
+	if up != nil {
+		progress = driver.NewProgress(file.GetSize(), up)
+		tee = io.TeeReader(tee, progress)
+	}
+
+	// 创建 HTTP 请求，使用流式上传
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %v", err)
 	}
@@ -482,7 +489,12 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 	req.Header.Set("Content-Type", "application/octet-stream")
 	// 手动设置 Content-Length
 	req.ContentLength = file.GetSize()
-	client := &http.Client{}
+
+	// 创建支持流式上传的 HTTP 客户端
+	client := &http.Client{
+		Timeout: 0, // 不设置超时，让大文件有足够时间上传
+	}
+
 	response, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("发送请求失败: %v", err)
@@ -647,6 +659,128 @@ func IsDir(path string) bool {
 		return false
 	}
 	return fileInfo.IsDir()
+}
+
+// UploadChunkToS3Put 专门用于分块的流式上传，避免缓存
+func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
+	// 创建 SHA-1 哈希计算器
+	hash := sha1.New()
+	tee := io.TeeReader(reader, hash)
+
+	// 创建进度跟踪器
+	var progress io.Writer
+	if up != nil {
+		progress = driver.NewProgress(size, up)
+		tee = io.TeeReader(tee, progress)
+	}
+
+	// 创建 HTTP 请求，使用流式上传
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
+	if err != nil {
+		return "", fmt.Errorf("创建请求失败: %v", err)
+	}
+
+	//设置请求头
+	for _, header := range resp.PutHeaders {
+		req.Header.Set(header.Name, header.Value)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	// 手动设置 Content-Length
+	req.ContentLength = size
+
+	// 创建支持流式上传的 HTTP 客户端
+	client := &http.Client{
+		Timeout: 0, // 不设置超时，让大文件有足够时间上传
+	}
+
+	response, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("发送请求失败: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
+		body, _ := io.ReadAll(response.Body)
+		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
+	}
+	fmt.Printf("分块上传成功，状态码: %d\n", response.StatusCode)
+	// 计算文件的 SHA-1 值
+	sha1Value := hash.Sum(nil)
+	sha1Hex := hex.EncodeToString(sha1Value)
+	return sha1Hex, nil
+}
+
+// UploadAndUpdateChunkPut 专门用于分块上传的方法
+func (s *NotionService) UploadAndUpdateChunkPut(reader io.Reader, size int64, name string, id string, up driver.UpdateProgress) (string, error) {
+	record := RecordInfo{
+		Table:   "block",
+		ID:      id,
+		SpaceID: s.spaceID,
+	}
+
+	// 1. 获取上传URL
+	uploadResponse, err := s.UploadChunkFilePut(name, size, record)
+	if err != nil {
+		return "", fmt.Errorf("获取上传URL失败: %v", err)
+	}
+
+	// 2. 直接上传到S3
+	hash1, err := s.UploadChunkToS3Put(reader, size, uploadResponse, up)
+	if err != nil {
+		return "", fmt.Errorf("上传到S3失败: %v", err)
+	}
+
+	// 3. 更新文件状态
+	err = s.UpdateFileStatus(record, name, uploadResponse.URL)
+	if err != nil {
+		return "", fmt.Errorf("更新文件状态失败: %v", err)
+	}
+
+	return hash1, nil
+}
+
+// UploadChunkFilePut 为分块上传获取上传URL
+func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo RecordInfo) (*UploadResponse, error) {
+	reqBody := UploadFileRequest{
+		Bucket:              "secure",
+		Name:                name,
+		ContentType:         "application/octet-stream",
+		Record:              recordInfo,
+		SupportExtraHeaders: true,
+		ContentLength:       size,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+
+	s.setPutCommonHeaders(req)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	fmt.Printf("获取分块上传URL状态: %s\n", resp.Status)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var uploadResponse UploadResponse
+	err = json.Unmarshal(body, &uploadResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return &uploadResponse, nil
 }
 
 // do others that not defined in Driver interface

@@ -540,15 +540,6 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 		// 创建限制读取器，只读取当前分块的数据
 		chunkReader := io.LimitReader(s.file, currentChunkSize)
 
-		// 创建分块流
-		chunkStream := &ChunkFileStream{
-			Reader:   chunkReader,
-			name:     chunkName,
-			size:     currentChunkSize,
-			mimetype: s.file.GetMimetype(),
-			Closers:  utils.NewClosers(),
-		}
-
 		// 上传分块并计算进度
 		chunkProgress := func(percentage float64) {
 			totalProgress := (float64(i) + percentage/100.0) / float64(s.chunkCount) * 100.0
@@ -557,7 +548,8 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 			}
 		}
 
-		hash1, err := s.notionClient.UploadAndUpdateFilePut(chunkStream, pageID, chunkProgress)
+		// 使用专门的分块上传方法，避免缓存
+		hash1, err := s.notionClient.UploadAndUpdateChunkPut(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress)
 		if err != nil {
 			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
 		}
