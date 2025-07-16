@@ -12,6 +12,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
+	"github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/http_range"
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 	"gorm.io/driver/mysql"
@@ -155,10 +156,10 @@ func (d *Notion) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 			return rangeReadCloser.RangeRead(ctx, httpRange)
 		}
 
-		resultRangeReadCloser := &model.RangeReadCloser{RangeReader: resultRangeReader}
+		// resultRangeReadCloser := &model.RangeReadCloser{RangeReader: resultRangeReader}
 
 		return &model.Link{
-			RangeReadCloser: resultRangeReadCloser,
+			RangeReader: stream.RateLimitRangeReaderFunc(resultRangeReader),
 		}, nil
 	} else {
 		// 单文件，返回直接URL
@@ -506,7 +507,11 @@ func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize i
 	if err != nil {
 		return nil, fmt.Errorf("缓存文件失败: %v", err)
 	}
-	defer tempFile.Close()
+	defer func() {
+		if closer, ok := tempFile.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
 
 	// 创建主文件记录
 	f := &File{

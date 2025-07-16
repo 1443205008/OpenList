@@ -22,7 +22,6 @@ type Addition struct {
 var config = driver.Config{
 	Name:              "Notion",
 	LocalSort:         false,
-	OnlyLocal:         false,
 	OnlyProxy:         true, // 使用代理模式，支持分块下载
 	NoCache:           false,
 	NoUpload:          false,

@@ -208,6 +208,7 @@ type ChunkFileStream struct {
 	name     string
 	size     int64
 	mimetype string
+	utils.Closers
 }
 
 func (c *ChunkFileStream) GetName() string {
@@ -296,7 +297,7 @@ func NewChunkedRangeReadCloser(notionClient *NotionService, chunks []FileChunk, 
 		notionClient: notionClient,
 		chunks:       chunks,
 		fileSize:     fileSize,
-		Closers:      utils.EmptyClosers(),
+		Closers:      utils.NewClosers(),
 	}
 }
 
