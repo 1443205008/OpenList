@@ -133,8 +133,8 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("解析响应体失败: %v", err)
 	}
-	fmt.Printf("创建页面成功，页面ID: %s\n", page.ID)
-	fmt.Printf("页面创建成功，状态码: %d\n", resp.StatusCode)
+	// fmt.Printf("创建页面成功，页面ID: %s\n", page.ID)
+	// fmt.Printf("页面创建成功，状态码: %d\n", resp.StatusCode)
 	return page.ID, nil
 }
 
@@ -589,7 +589,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 		return fmt.Errorf("更新文件状态失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
 	}
 
-	fmt.Printf("文件状态更新成功，状态码: %d\n", resp.StatusCode)
+	// fmt.Printf("文件状态更新成功，状态码: %d\n", resp.StatusCode)
 	return nil
 }
 
@@ -702,7 +702,7 @@ func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *U
 		body, _ := io.ReadAll(response.Body)
 		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
-	fmt.Printf("分块上传成功，状态码: %d\n", response.StatusCode)
+	// fmt.Printf("分块上传成功，状态码: %d\n", response.StatusCode)
 	// 计算文件的 SHA-1 值
 	sha1Value := hash.Sum(nil)
 	sha1Hex := hex.EncodeToString(sha1Value)
@@ -768,7 +768,7 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("获取分块上传URL状态: %s\n", resp.Status)
+	// fmt.Printf("获取分块上传URL状态: %s\n", resp.Status)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
