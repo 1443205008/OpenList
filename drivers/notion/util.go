@@ -188,8 +188,6 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	// 3. 更新文件状态
 	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 
-	// 4. 更新文件的SHA1值
-
 	if err != nil {
 		return "", fmt.Errorf("更新文件状态失败: %v", err)
 	}
@@ -504,7 +502,7 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 		body, _ := io.ReadAll(response.Body)
 		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
-	fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
+	// fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
 	// 计算文件的 SHA-1 值
 	sha1Value := hash.Sum(nil)
 	sha1Hex := hex.EncodeToString(sha1Value)
