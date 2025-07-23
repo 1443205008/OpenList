@@ -23,6 +23,10 @@ const (
 	MaxChunkSize = 4.5 * 1024 * 1024 * 1024 // 4.5GB
 	// ChunkThreshold 超过5GB的文件启用分块
 	ChunkThreshold = 5 * 1024 * 1024 * 1024 // 5GB
+	// MaxConcurrentUploads 最大并发上传数，避免过多连接
+	MaxConcurrentUploads = 10
+	// MaxConcurrentChunks 最大并发分块数
+	MaxConcurrentChunks = 2
 )
 
 type Notion struct {
@@ -515,16 +519,18 @@ func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize i
 
 	// 创建流式分块上传器
 	streamUploader := &StreamChunkUploader{
-		file:         file,
-		fileSize:     fileSize,
-		chunkSize:    MaxChunkSize,
-		chunkCount:   chunkCount,
-		fileName:     fileName,
-		notionClient: d.notionClient,
-		fileRecord:   f,
-		db:           d.db,
-		ctx:          ctx,
-		progress:     up,
+		file:             file,
+		fileSize:         fileSize,
+		chunkSize:        MaxChunkSize,
+		chunkCount:       chunkCount,
+		fileName:         fileName,
+		notionClient:     d.notionClient,
+		fileRecord:       f,
+		db:               d.db,
+		ctx:              ctx,
+		progress:         up,
+		maxConcurrency:   MaxConcurrentChunks,
+		progressThrottle: 200 * time.Millisecond,
 	}
 
 	// 执行流式分块上传
