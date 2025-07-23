@@ -83,7 +83,6 @@ func (d *Notion) Init(ctx context.Context) error {
 	// 初始化Notion客户端
 	d.notionClient = NewNotionService(d.NotionCookie, d.NotionToken, d.NotionSpaceID, d.NotionDatabaseID, d.NotionFilePageID)
 	d.db = db
-
 	return nil
 }
 
