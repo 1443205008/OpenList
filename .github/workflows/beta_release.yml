@@ -61,18 +61,13 @@ jobs:
     strategy:
       matrix:
         include:
-          - target: "!(*musl*|*windows-arm64*|*android*|*freebsd*)" # xgo
-            hash: "md5"
-          - target: "linux-!(arm*)-musl*" #musl-not-arm
-            hash: "md5-linux-musl"
-          - target: "linux-arm*-musl*" #musl-arm
-            hash: "md5-linux-musl-arm"
-          - target: "windows-arm64" #win-arm64
-            hash: "md5-windows-arm64"
-          - target: "android-*" #android
-            hash: "md5-android"
-          - target: "freebsd-*" #freebsd
-            hash: "md5-freebsd"
+          # 只构建 Linux amd64 和 arm64 版本
+          # 注意：这里的 'targets' 字符串需要与你的 cgo-actions 匹配
+          # 通常，'linux-amd64' 和 'linux-arm64' 是标准的 GOOS-GOARCH 组合
+          - target: "linux-amd64"
+            hash: "md5-linux-amd64" # 可以自定义一个合适的 hash 名称
+          - target: "linux-arm64"
+            hash: "md5-linux-arm64" # 可以自定义一个合适的 hash 名称
 
     name: Beta Release
     runs-on: ubuntu-latest
