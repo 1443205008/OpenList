@@ -38,14 +38,6 @@ jobs:
         run: |
           git tag -l
           npx changelogithub --output CHANGELOG.md
-          npx changelogithub --output CHANGELOG.md
-          FILE_SIZE=$(wc -c < CHANGELOG.md)
-          MAX_SIZE=12000
-          if [ "$FILE_SIZE" -gt "$MAX_SIZE" ]; then
-            head -c "$MAX_SIZE" CHANGELOG.md > CHANGELOG_TRUNCATED.md
-            echo "更新日志已截断至 $MAX_SIZE 字节。"
-            mv CHANGELOG_TRUNCATED.md CHANGELOG.md
-          fi
 
       - name: Upload assets to beta release
         uses: softprops/action-gh-release@v2

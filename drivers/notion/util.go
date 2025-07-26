@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"hash"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -16,7 +15,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
@@ -28,142 +26,6 @@ const (
 	NotionAPIBaseURL = "https://www.notion.so/api/v3"
 	S3BaseURL        = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
 )
-
-var (
-	// 全局HTTP客户端池，减少连接创建开销
-	httpClientPool = &sync.Pool{
-		New: func() interface{} {
-			return &http.Client{
-				Timeout: 0, // 不设置超时，让大文件有足够时间上传
-				Transport: &http.Transport{
-					MaxIdleConns:        100,              // 最大空闲连接数
-					MaxIdleConnsPerHost: 10,               // 每个主机的最大空闲连接数
-					IdleConnTimeout:     90 * time.Second, // 空闲连接超时时间
-					DisableCompression:  true,             // 禁用压缩以减少CPU使用
-				},
-			}
-		},
-	}
-
-	// API客户端池，用于Notion API调用
-	apiClientPool = &sync.Pool{
-		New: func() interface{} {
-			return &http.Client{
-				Timeout: 30 * time.Second, // API调用设置合理超时
-				Transport: &http.Transport{
-					MaxIdleConns:        50,
-					MaxIdleConnsPerHost: 5,
-					IdleConnTimeout:     60 * time.Second,
-					DisableCompression:  false, // API调用可以使用压缩
-				},
-			}
-		},
-	}
-)
-
-// getHTTPClient 从池中获取HTTP客户端
-func getHTTPClient() *http.Client {
-	return httpClientPool.Get().(*http.Client)
-}
-
-// putHTTPClient 将HTTP客户端放回池中
-func putHTTPClient(client *http.Client) {
-	httpClientPool.Put(client)
-}
-
-// getAPIClient 从池中获取API客户端
-func getAPIClient() *http.Client {
-	return apiClientPool.Get().(*http.Client)
-}
-
-// putAPIClient 将API客户端放回池中
-func putAPIClient(client *http.Client) {
-	apiClientPool.Put(client)
-}
-
-// ThrottledProgressTracker 节流的进度跟踪器
-type ThrottledProgressTracker struct {
-	totalSize       int64
-	currentProgress int64
-	lastReported    int64
-	updateCallback  driver.UpdateProgress
-	lastUpdateTime  time.Time
-	updateInterval  time.Duration
-	reportThreshold int64 // 进度变化阈值，避免微小变化的频繁更新
-	mu              sync.Mutex
-}
-
-// NewThrottledProgressTracker 创建节流进度跟踪器
-func NewThrottledProgressTracker(totalSize int64, callback driver.UpdateProgress) *ThrottledProgressTracker {
-	return &ThrottledProgressTracker{
-		totalSize:       totalSize,
-		updateCallback:  callback,
-		updateInterval:  200 * time.Millisecond, // 限制更新频率为每200ms
-		reportThreshold: totalSize / 1000,       // 0.1%的变化才更新
-	}
-}
-
-// Write 实现io.Writer接口，用于跟踪写入进度
-func (t *ThrottledProgressTracker) Write(p []byte) (n int, err error) {
-	n = len(p)
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.currentProgress += int64(n)
-
-	// 检查是否需要更新进度
-	now := time.Now()
-	progressDiff := t.currentProgress - t.lastReported
-
-	if progressDiff >= t.reportThreshold && now.Sub(t.lastUpdateTime) >= t.updateInterval {
-		if t.updateCallback != nil {
-			percentage := float64(t.currentProgress) * 100.0 / float64(t.totalSize)
-			t.updateCallback(percentage)
-		}
-		t.lastReported = t.currentProgress
-		t.lastUpdateTime = now
-	}
-
-	return n, nil
-}
-
-// OptimizedHashWriter 优化的哈希写入器，减少内存分配
-type OptimizedHashWriter struct {
-	hash           hash.Hash
-	progressWriter io.Writer
-	totalWritten   int64
-}
-
-// NewOptimizedHashWriter 创建优化的哈希写入器
-func NewOptimizedHashWriter(progressWriter io.Writer) *OptimizedHashWriter {
-	return &OptimizedHashWriter{
-		hash:           sha1.New(),
-		progressWriter: progressWriter,
-	}
-}
-
-// Write 实现io.Writer接口
-func (w *OptimizedHashWriter) Write(p []byte) (n int, err error) {
-	// 同时写入哈希和进度跟踪器
-	n, err = w.hash.Write(p)
-	if err != nil {
-		return n, err
-	}
-
-	w.totalWritten += int64(n)
-
-	// 如果有进度跟踪器，也写入进度
-	if w.progressWriter != nil {
-		w.progressWriter.Write(p)
-	}
-
-	return n, nil
-}
-
-// Sum 获取哈希值
-func (w *OptimizedHashWriter) Sum() string {
-	return hex.EncodeToString(w.hash.Sum(nil))
-}
 
 func NewNotionService(cookie, token, spaceID, databaseID string, filePageID string) *NotionService {
 	//从cookie中获取userId
@@ -253,8 +115,7 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 	req.Header.Set("Notion-Version", "2022-06-28")
 	req.Header.Set("Content-Type", "application/json")
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("发送请求失败: %v", err)
@@ -405,8 +266,7 @@ func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*Upl
 
 	s.setCommonHeaders(req)
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -451,8 +311,7 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 
 	s.setPutCommonHeaders(req)
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
@@ -575,9 +434,10 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	req.Header.Set("Content-Length", strconv.FormatInt(totalLength, 10))
 
-	// 使用连接池中的客户端
-	client := getHTTPClient()
-	defer putHTTPClient(client)
+	// 创建带超时的客户端
+	client := &http.Client{
+		Timeout: 30 * time.Minute, // 设置较长的超时时间，适合大文件上传
+	}
 
 	// 发送请求
 	resp, err := client.Do(req)
@@ -603,15 +463,16 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 }
 
 func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
-	// 创建优化的进度跟踪器
-	var progressTracker *ThrottledProgressTracker
-	if up != nil {
-		progressTracker = NewThrottledProgressTracker(file.GetSize(), up)
-	}
+	// 创建 SHA-1 哈希计算器
+	hash := sha1.New()
+	tee := io.TeeReader(file, hash)
 
-	// 创建优化的哈希写入器，同时处理哈希和进度
-	hashWriter := NewOptimizedHashWriter(progressTracker)
-	tee := io.TeeReader(file, hashWriter)
+	// 创建进度跟踪器
+	var progress io.Writer
+	if up != nil {
+		progress = driver.NewProgress(file.GetSize(), up)
+		tee = io.TeeReader(tee, progress)
+	}
 
 	// 创建 HTTP 请求，使用流式上传
 	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
@@ -627,9 +488,10 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 	// 手动设置 Content-Length
 	req.ContentLength = file.GetSize()
 
-	// 使用连接池中的客户端
-	client := getHTTPClient()
-	defer putHTTPClient(client)
+	// 创建支持流式上传的 HTTP 客户端
+	client := &http.Client{
+		Timeout: 0, // 不设置超时，让大文件有足够时间上传
+	}
 
 	response, err := client.Do(req)
 	if err != nil {
@@ -641,8 +503,9 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
 	// fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
-	// 获取计算好的 SHA-1 值
-	sha1Hex := hashWriter.Sum()
+	// 计算文件的 SHA-1 值
+	sha1Value := hash.Sum(nil)
+	sha1Hex := hex.EncodeToString(sha1Value)
 	return sha1Hex, nil
 }
 
@@ -712,8 +575,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 
 	s.setCommonHeaders(req)
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("发送请求失败: %v", err)
@@ -759,8 +621,7 @@ func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*Prop
 	req.Header.Set("Notion-Version", "2022-06-28")
 	req.Header.Set("Content-Type", "application/json")
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("发送请求失败: %v", err)
@@ -800,15 +661,16 @@ func IsDir(path string) bool {
 
 // UploadChunkToS3Put 专门用于分块的流式上传，避免缓存
 func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
-	// 创建优化的进度跟踪器
-	var progressTracker *ThrottledProgressTracker
-	if up != nil {
-		progressTracker = NewThrottledProgressTracker(size, up)
-	}
+	// 创建 SHA-1 哈希计算器
+	hash := sha1.New()
+	tee := io.TeeReader(reader, hash)
 
-	// 创建优化的哈希写入器，同时处理哈希和进度
-	hashWriter := NewOptimizedHashWriter(progressTracker)
-	tee := io.TeeReader(reader, hashWriter)
+	// 创建进度跟踪器
+	var progress io.Writer
+	if up != nil {
+		progress = driver.NewProgress(size, up)
+		tee = io.TeeReader(tee, progress)
+	}
 
 	// 创建 HTTP 请求，使用流式上传
 	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
@@ -824,9 +686,10 @@ func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *U
 	// 手动设置 Content-Length
 	req.ContentLength = size
 
-	// 使用连接池中的客户端
-	client := getHTTPClient()
-	defer putHTTPClient(client)
+	// 创建支持流式上传的 HTTP 客户端
+	client := &http.Client{
+		Timeout: 0, // 不设置超时，让大文件有足够时间上传
+	}
 
 	response, err := client.Do(req)
 	if err != nil {
@@ -838,8 +701,9 @@ func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *U
 		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
 	// fmt.Printf("分块上传成功，状态码: %d\n", response.StatusCode)
-	// 获取计算好的 SHA-1 值
-	sha1Hex := hashWriter.Sum()
+	// 计算文件的 SHA-1 值
+	sha1Value := hash.Sum(nil)
+	sha1Hex := hex.EncodeToString(sha1Value)
 	return sha1Hex, nil
 }
 
@@ -895,8 +759,7 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 
 	s.setPutCommonHeaders(req)
 
-	client := getAPIClient()
-	defer putAPIClient(client)
+	client := &http.Client{}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err

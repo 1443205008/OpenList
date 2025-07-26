@@ -6,7 +6,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -510,30 +509,11 @@ type StreamChunkUploader struct {
 	db           interface{} // 使用 interface{} 避免导入 gorm
 	ctx          context.Context
 	progress     func(float64)
-
-	// 优化相关字段
-	maxConcurrency     int           // 最大并发数
-	progressThrottle   time.Duration // 进度更新节流间隔
-	lastProgressUpdate time.Time     // 上次进度更新时间
 }
 
-// Upload 执行流式分块上传 - 优化版本
+// Upload 执行流式分块上传
 func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
-	// 设置默认值
-	if s.maxConcurrency <= 0 {
-		s.maxConcurrency = 3 // 限制并发数，避免过多HTTP连接
-	}
-	if s.progressThrottle <= 0 {
-		s.progressThrottle = 100 * time.Millisecond // 限制进度更新频率
-	}
-
-	chunks := make([]FileChunk, s.chunkCount)
-	semaphore := make(chan struct{}, s.maxConcurrency)
-
-	// 使用 errgroup 进行并发控制
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var uploadErr error
+	var chunks []FileChunk
 	var totalRead int64
 
 	for i := int64(0); i < s.chunkCount; i++ {
@@ -550,107 +530,44 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 			currentChunkSize = s.fileSize - totalRead
 		}
 
-		wg.Add(1)
-		go func(chunkIndex int64, chunkSize int64, offset int64) {
-			defer wg.Done()
+		// 创建分块页面
+		chunkName := fmt.Sprintf("%s.chunk%d", s.fileName, i)
+		pageID, err := s.notionClient.CreateDatabasePage(chunkName)
+		if err != nil {
+			return nil, fmt.Errorf("创建分块页面失败: %v", err)
+		}
 
-			// 获取信号量
-			semaphore <- struct{}{}
-			defer func() { <-semaphore }()
+		// 创建限制读取器，只读取当前分块的数据
+		chunkReader := io.LimitReader(s.file, currentChunkSize)
 
-			// 检查是否已有错误
-			mu.Lock()
-			if uploadErr != nil {
-				mu.Unlock()
-				return
+		// 上传分块并计算进度
+		chunkProgress := func(percentage float64) {
+			totalProgress := (float64(i) + percentage/100.0) / float64(s.chunkCount) * 100.0
+			if s.progress != nil {
+				s.progress(totalProgress)
 			}
-			mu.Unlock()
+		}
 
-			// 创建分块页面
-			chunkName := fmt.Sprintf("%s.chunk%d", s.fileName, chunkIndex)
-			pageID, err := s.notionClient.CreateDatabasePage(chunkName)
-			if err != nil {
-				mu.Lock()
-				if uploadErr == nil {
-					uploadErr = fmt.Errorf("创建分块页面失败: %v", err)
-				}
-				mu.Unlock()
-				return
-			}
+		// 使用专门的分块上传方法，避免缓存
+		hash1, err := s.notionClient.UploadAndUpdateChunkPut(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress)
+		if err != nil {
+			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
+		}
 
-			// 使用RangeRead避免内存拷贝
-			chunkReader, err := s.file.RangeRead(http_range.Range{
-				Start:  offset,
-				Length: chunkSize,
-			})
-			if err != nil {
-				mu.Lock()
-				if uploadErr == nil {
-					uploadErr = fmt.Errorf("读取分块数据失败: %v", err)
-				}
-				mu.Unlock()
-				return
-			}
-			defer func() {
-				if closer, ok := chunkReader.(io.Closer); ok {
-					closer.Close()
-				}
-			}()
-
-			// 优化的进度回调，减少调用频率
-			chunkProgress := s.createThrottledProgressCallback(chunkIndex)
-
-			// 使用专门的分块上传方法
-			hash1, err := s.notionClient.UploadAndUpdateChunkPut(chunkReader, chunkSize, chunkName, pageID, chunkProgress)
-			if err != nil {
-				mu.Lock()
-				if uploadErr == nil {
-					uploadErr = fmt.Errorf("上传分块%d失败: %v", chunkIndex, err)
-				}
-				mu.Unlock()
-				return
-			}
-
-			// 创建分块记录
-			chunk := FileChunk{
-				FileID:       s.fileRecord.ID,
-				ChunkIndex:   int(chunkIndex),
-				ChunkSize:    chunkSize,
-				StartOffset:  offset,
-				EndOffset:    offset + chunkSize,
-				NotionPageID: pageID,
-				SHA1:         hash1,
-			}
-
-			mu.Lock()
-			chunks[chunkIndex] = chunk
-			mu.Unlock()
-		}(i, currentChunkSize, totalRead)
+		// 创建分块记录
+		chunk := FileChunk{
+			FileID:       s.fileRecord.ID,
+			ChunkIndex:   int(i),
+			ChunkSize:    currentChunkSize,
+			StartOffset:  totalRead,
+			EndOffset:    totalRead + currentChunkSize,
+			NotionPageID: pageID,
+			SHA1:         hash1,
+		}
+		chunks = append(chunks, chunk)
 
 		totalRead += currentChunkSize
 	}
 
-	wg.Wait()
-
-	if uploadErr != nil {
-		return nil, uploadErr
-	}
-
 	return chunks, nil
-}
-
-// createThrottledProgressCallback 创建节流的进度回调
-func (s *StreamChunkUploader) createThrottledProgressCallback(chunkIndex int64) func(float64) {
-	return func(percentage float64) {
-		now := time.Now()
-		if now.Sub(s.lastProgressUpdate) < s.progressThrottle {
-			return // 跳过过于频繁的更新
-		}
-
-		s.lastProgressUpdate = now
-		totalProgress := (float64(chunkIndex) + percentage/100.0) / float64(s.chunkCount) * 100.0
-		if s.progress != nil {
-			s.progress(totalProgress)
-		}
-	}
 }
