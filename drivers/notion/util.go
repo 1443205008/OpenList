@@ -323,6 +323,7 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 	if err != nil {
 		return nil, err
 	}
+	fmt.Printf("上传文件响应: %s\n", string(body))
 
 	var uploadResponse UploadResponse
 	err = json.Unmarshal(body, &uploadResponse)
@@ -597,6 +598,8 @@ func (s *NotionService) setCommonHeaders(req *http.Request) {
 	req.Header.Set("notion-client-version", "23.13.0.4539")
 	req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
+	req.Header.Set("X-Notion-Active-User-Header", s.userId)
+	req.Header.Set("X-Notion-Space-Id", s.spaceID)
 }
 
 func (s *NotionService) setPutCommonHeaders(req *http.Request) {
@@ -605,8 +608,10 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 	// req.Header.Set("notion-client-version", "23.13.0.2948")
 	// req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
-	req.Header.Set("x-notion-active-user-header", s.userId)
-	req.Header.Set("x-notion-space-id", s.spaceID)
+	req.Header.Set("X-Notion-Active-User-Header", s.userId)
+	req.Header.Set("X-Notion-Space-Id", s.spaceID)
+	fmt.Printf("设置请求头X-Notion-Active-User-Header: %s\n", req.Header.Get("X-Notion-Active-User-Header"))
+	fmt.Printf("设置请求头X-Notion-Space-Id: %s\n", req.Header.Get("X-Notion-Space-Id"))
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
