@@ -605,6 +605,8 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 	// req.Header.Set("notion-client-version", "23.13.0.2948")
 	// req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
+	req.Header.Set("x-notion-active-user-header", s.userId)
+	req.Header.Set("x-notion-space-id", s.spaceID)
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
