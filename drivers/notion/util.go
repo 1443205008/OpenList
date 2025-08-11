@@ -604,14 +604,24 @@ func (s *NotionService) setCommonHeaders(req *http.Request) {
 
 func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
 	// req.Header.Set("notion-client-version", "23.13.0.2948")
 	// req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
 	req.Header.Set("X-Notion-Active-User-Header", s.userId)
 	req.Header.Set("X-Notion-Space-Id", s.spaceID)
-	fmt.Printf("设置请求头X-Notion-Active-User-Header: %s\n", req.Header.Get("X-Notion-Active-User-Header"))
-	fmt.Printf("设置请求头X-Notion-Space-Id: %s\n", req.Header.Get("X-Notion-Space-Id"))
+
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("Origin", "https://www.notion.so")
+	req.Header.Set("Referer", "https://www.notion.so/")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
+	req.Header.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	req.Header.Set("sec-fetch-dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
