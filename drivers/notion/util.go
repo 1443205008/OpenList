@@ -594,7 +594,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 func (s *NotionService) setCommonHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("notion-client-version", "23.13.0.2948")
+	req.Header.Set("notion-client-version", "23.13.0.4539")
 	req.Header.Set("notion-audit-log-platform", "web")
 	req.Header.Set("Cookie", s.cookie)
 }
