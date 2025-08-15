@@ -107,10 +107,18 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -d dev || true
-          git push origin --delete dev || true
+          
+          # Delete local tag if exists
+          git tag -d dev 2>/dev/null || echo "Local tag 'dev' does not exist"
+          
+          # Delete remote tag if exists
+          git push origin --delete refs/tags/dev 2>/dev/null || echo "Remote tag 'dev' does not exist"
+          
+          # Create new tag
           git tag dev ${{ github.sha }}
-          git push origin dev
+          
+          # Push new tag
+          git push origin refs/tags/dev
 
       - name: Create dev release
         uses: softprops/action-gh-release@v2
