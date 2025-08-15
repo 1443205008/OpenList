@@ -27,7 +27,6 @@ type FileInfo struct {
 	ID           int       `json:"id"`
 	Name         string    `json:"name"`
 	Size         int64     `json:"size"`
-	SHA1         string    `json:"sha1"`
 	NotionPageID string    `json:"notion_page_id"`
 	URL          string    `json:"url"`
 	ContentType  string    `json:"content_type"`
@@ -48,7 +47,6 @@ type File struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
 	Name         string    `json:"name"`
 	Size         int64     `json:"size"`
-	SHA1         string    `json:"sha1" gorm:"index"`
 	NotionPageID string    `json:"notion_page_id"`
 	DirectoryID  int       `json:"directory_id" gorm:"index"`
 	IsChunked    bool      `json:"is_chunked" gorm:"default:false"`
@@ -67,7 +65,6 @@ type FileChunk struct {
 	StartOffset  int64     `json:"start_offset"`
 	EndOffset    int64     `json:"end_offset"`
 	NotionPageID string    `json:"notion_page_id"`
-	SHA1         string    `json:"sha1"`
 	Deleted      bool      `json:"deleted" gorm:"default:false"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
@@ -550,7 +547,7 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 		}
 
 		// 使用专门的分块上传方法，避免缓存
-		hash1, err := s.notionClient.UploadAndUpdateChunkPut(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress)
+		err = s.notionClient.UploadAndUpdateChunkPut(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress)
 		if err != nil {
 			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
 		}
@@ -563,7 +560,6 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 			StartOffset:  totalRead,
 			EndOffset:    totalRead + currentChunkSize,
 			NotionPageID: pageID,
-			SHA1:         hash1,
 		}
 		chunks = append(chunks, chunk)
 
