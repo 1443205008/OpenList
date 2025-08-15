@@ -40,12 +40,13 @@ func NewNotionService(cookie, token, spaceID, databaseID string, filePageID stri
 	}
 	// 创建 NotionService 实例
 	return &NotionService{
-		cookie:     cookie,
-		token:      token,
-		spaceID:    spaceID,
-		databaseID: databaseID,
-		filePageID: filePageID,
-		userId:     userId,
+		cookie:         cookie,
+		token:          token,
+		spaceID:        spaceID,
+		databaseID:     databaseID,
+		filePageID:     filePageID,
+		userId:         userId,
+		cycleTLSClient: NewCycleTLSClient(), // 初始化CycleTLS客户端
 	}
 }
 
@@ -308,36 +309,25 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 		return nil, err
 	}
 
-	// 使用反CF检测的重试机制
-	operation := func() (*http.Response, error) {
-		req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
-		if err != nil {
-			return nil, err
-		}
-
-		// 使用增强的反CF检测请求头
-		setEnhancedAntiCFHeaders(req, s.cookie, s.userId, s.spaceID)
-
-		// 使用反CF检测的HTTP客户端
-		client := createAntiCFClient()
-		return client.Do(req)
+	// 准备请求头
+	headers := map[string]string{
+		"Cookie":                      s.cookie,
+		"X-Notion-Active-User-Header": s.userId,
+		"X-Notion-Space-Id":           s.spaceID,
 	}
 
-	resp, err := retryWithExponentialBackoff(operation, MaxRetryAttempts)
+	// 使用CycleTLS发送请求
+	ctx := context.Background()
+	resp, err := s.cycleTLSClient.DoNotionAPIRequest(ctx, "POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData, headers)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件请求失败: %v", err)
 	}
-	defer resp.Body.Close()
 
-	fmt.Printf("上传文件请求状态: %s\n", resp.Status)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	fmt.Printf("上传文件响应: %s\n", string(body))
+	fmt.Printf("上传文件请求状态: %d\n", resp.Status)
+	fmt.Printf("上传文件响应: %s\n", resp.Body)
 
 	var uploadResponse UploadResponse
-	err = json.Unmarshal(body, &uploadResponse)
+	err = json.Unmarshal([]byte(resp.Body), &uploadResponse)
 	if err != nil {
 		return nil, err
 	}
@@ -780,35 +770,24 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 		return nil, err
 	}
 
-	// 使用反CF检测的重试机制
-	operation := func() (*http.Response, error) {
-		req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
-		if err != nil {
-			return nil, err
-		}
-
-		// 使用增强的反CF检测请求头
-		setEnhancedAntiCFHeaders(req, s.cookie, s.userId, s.spaceID)
-
-		// 使用反CF检测的HTTP客户端
-		client := createAntiCFClient()
-		return client.Do(req)
+	// 准备请求头
+	headers := map[string]string{
+		"Cookie":                      s.cookie,
+		"X-Notion-Active-User-Header": s.userId,
+		"X-Notion-Space-Id":           s.spaceID,
 	}
 
-	resp, err := retryWithExponentialBackoff(operation, MaxRetryAttempts)
+	// 使用CycleTLS发送分块上传URL请求
+	ctx := context.Background()
+	resp, err := s.cycleTLSClient.DoNotionAPIRequest(ctx, "POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData, headers)
 	if err != nil {
 		return nil, fmt.Errorf("获取分块上传URL失败: %v", err)
 	}
-	defer resp.Body.Close()
 
-	// fmt.Printf("获取分块上传URL状态: %s\n", resp.Status)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
+	// fmt.Printf("获取分块上传URL状态: %d\n", resp.Status)
 
 	var uploadResponse UploadResponse
-	err = json.Unmarshal(body, &uploadResponse)
+	err = json.Unmarshal([]byte(resp.Body), &uploadResponse)
 	if err != nil {
 		return nil, err
 	}

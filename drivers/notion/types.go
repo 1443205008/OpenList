@@ -14,12 +14,13 @@ import (
 )
 
 type NotionService struct {
-	cookie     string
-	token      string
-	spaceID    string
-	databaseID string
-	filePageID string
-	userId     string
+	cookie         string
+	token          string
+	spaceID        string
+	databaseID     string
+	filePageID     string
+	userId         string
+	cycleTLSClient *CycleTLSClient
 }
 
 type FileInfo struct {
