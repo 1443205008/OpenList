@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha1"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"mime/multipart"
 	"net/http"
 	"net/url"
@@ -25,6 +27,8 @@ import (
 const (
 	NotionAPIBaseURL = "https://www.notion.so/api/v3"
 	S3BaseURL        = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
+	MaxRetryAttempts = 3
+	BaseRetryDelay   = 1 * time.Second
 )
 
 func NewNotionService(cookie, token, spaceID, databaseID string, filePageID string) *NotionService {
@@ -304,17 +308,24 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
+	// 使用反CF检测的重试机制
+	operation := func() (*http.Response, error) {
+		req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, err
+		}
+
+		// 使用增强的反CF检测请求头
+		setEnhancedAntiCFHeaders(req, s.cookie, s.userId, s.spaceID)
+
+		// 使用反CF检测的HTTP客户端
+		client := createAntiCFClient()
+		return client.Do(req)
 	}
 
-	s.setPutCommonHeaders(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := retryWithExponentialBackoff(operation, MaxRetryAttempts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("上传文件请求失败: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -769,17 +780,24 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
+	// 使用反CF检测的重试机制
+	operation := func() (*http.Response, error) {
+		req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
+		if err != nil {
+			return nil, err
+		}
+
+		// 使用增强的反CF检测请求头
+		setEnhancedAntiCFHeaders(req, s.cookie, s.userId, s.spaceID)
+
+		// 使用反CF检测的HTTP客户端
+		client := createAntiCFClient()
+		return client.Do(req)
 	}
 
-	s.setPutCommonHeaders(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := retryWithExponentialBackoff(operation, MaxRetryAttempts)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("获取分块上传URL失败: %v", err)
 	}
 	defer resp.Body.Close()
 
@@ -796,6 +814,115 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 	}
 
 	return &uploadResponse, nil
+}
+
+// createAntiCFClient 创建反CloudFlare检测的HTTP客户端
+func createAntiCFClient() *http.Client {
+	// 创建自定义的Transport来绕过CF检测
+	tr := &http.Transport{
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: false,
+			// 模拟Chrome的TLS指纹
+			MinVersion: tls.VersionTLS12,
+			MaxVersion: tls.VersionTLS13,
+			CipherSuites: []uint16{
+				tls.TLS_AES_128_GCM_SHA256,
+				tls.TLS_AES_256_GCM_SHA384,
+				tls.TLS_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+			},
+		},
+		ForceAttemptHTTP2: true,
+	}
+
+	return &http.Client{
+		Transport: tr,
+		Timeout:   30 * time.Second,
+	}
+}
+
+// retryWithExponentialBackoff 实现指数退避重试机制
+func retryWithExponentialBackoff(operation func() (*http.Response, error), maxRetries int) (*http.Response, error) {
+	var lastErr error
+
+	for attempt := 0; attempt <= maxRetries; attempt++ {
+		resp, err := operation()
+
+		if err == nil && resp.StatusCode != 403 && resp.StatusCode != 503 {
+			return resp, nil
+		}
+
+		if resp != nil {
+			resp.Body.Close()
+		}
+		lastErr = err
+
+		if attempt < maxRetries {
+			// 计算退避时间：基础延时 * 2^重试次数 + 随机抖动
+			backoffTime := BaseRetryDelay * time.Duration(1<<uint(attempt))
+			jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+			sleepTime := backoffTime + jitter
+
+			fmt.Printf("请求被CF拦截，第%d次重试，等待%v后重试\n", attempt+1, sleepTime)
+			time.Sleep(sleepTime)
+		}
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("重试%d次后仍然失败: %v", maxRetries, lastErr)
+	}
+
+	return nil, fmt.Errorf("重试%d次后仍被CF拦截", maxRetries)
+}
+
+// setEnhancedAntiCFHeaders 设置增强的反CF检测请求头
+func setEnhancedAntiCFHeaders(req *http.Request, cookie, userId, spaceID string) {
+	// 基础请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Cookie", cookie)
+	req.Header.Set("X-Notion-Active-User-Header", userId)
+	req.Header.Set("X-Notion-Space-Id", spaceID)
+
+	// 增强的浏览器模拟头
+	userAgents := []string{
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+	}
+
+	// 随机选择User-Agent
+	rand.Seed(time.Now().UnixNano())
+	selectedUA := userAgents[rand.Intn(len(userAgents))]
+	req.Header.Set("User-Agent", selectedUA)
+
+	// 设置完整的浏览器头信息
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
+	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
+	req.Header.Set("Origin", "https://www.notion.so")
+	req.Header.Set("Referer", "https://www.notion.so/")
+
+	// Chrome特有的安全头
+	req.Header.Set("sec-ch-ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
+	req.Header.Set("sec-ch-ua-mobile", "?0")
+	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
+	req.Header.Set("sec-fetch-dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+
+	// 连接相关头
+	req.Header.Set("Connection", "keep-alive")
+	req.Header.Set("Cache-Control", "no-cache")
+	req.Header.Set("Pragma", "no-cache")
+
+	// 添加一些随机性以避免检测
+	req.Header.Set("DNT", "1")
+	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
 
 // do others that not defined in Driver interface
