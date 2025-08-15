@@ -570,26 +570,25 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 		return fmt.Errorf("序列化请求体失败: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/saveTransactionsFanout", bytes.NewBuffer(jsonData))
+	// 准备请求头
+	headers := map[string]string{
+		"Cookie":                      s.cookie,
+		"X-Notion-Active-User-Header": s.userId,
+		"X-Notion-Space-Id":           s.spaceID,
+	}
+
+	// 使用CycleTLS发送更新文件状态请求
+	ctx := context.Background()
+	resp, err := s.cycleTLSClient.DoNotionAPIRequest(ctx, "POST", NotionAPIBaseURL+"/saveTransactionsFanout", jsonData, headers)
 	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("更新文件状态请求失败: %v", err)
 	}
 
-	s.setCommonHeaders(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("发送请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("更新文件状态失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	if resp.Status != 200 {
+		return fmt.Errorf("更新文件状态失败，状态码: %d, 响应: %s", resp.Status, resp.Body)
 	}
 
-	// fmt.Printf("文件状态更新成功，状态码: %d\n", resp.StatusCode)
+	// fmt.Printf("文件状态更新成功，状态码: %d\n", resp.Status)
 	return nil
 }
 
