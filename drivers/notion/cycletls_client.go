@@ -3,7 +3,6 @@ package notion
 import (
 	"context"
 	"fmt"
-	"io"
 	"math/rand"
 	"strings"
 	"sync"
@@ -14,10 +13,9 @@ import (
 
 // CycleTLSClient 包装CycleTLS客户端以处理反CF保护
 type CycleTLSClient struct {
-	client   cycletls.CycleTLS
-	mu       sync.RWMutex
-	sessions map[string]*cycletls.Response
-	timeout  time.Duration
+	client  cycletls.CycleTLS
+	mu      sync.RWMutex
+	timeout time.Duration
 }
 
 // NewCycleTLSClient 创建一个新的CycleTLS客户端实例
@@ -26,9 +24,8 @@ func NewCycleTLSClient() *CycleTLSClient {
 	client := cycletls.Init()
 
 	return &CycleTLSClient{
-		client:   client,
-		sessions: make(map[string]*cycletls.Response),
-		timeout:  30 * time.Second, // 默认30秒超时
+		client:  client,
+		timeout: 30 * time.Second, // 默认30秒超时
 	}
 }
 
@@ -239,54 +236,4 @@ func (c *CycleTLSClient) DoNotionAPIRequest(ctx context.Context, method, url str
 	}
 
 	return c.DoRequest(ctx, options)
-}
-
-// UploadWithCycleTLS 使用CycleTLS进行文件上传，支持大文件流式上传
-func (c *CycleTLSClient) UploadWithCycleTLS(ctx context.Context, method, url string, body io.Reader, contentLength int64, headers map[string]string) (*cycletls.Response, error) {
-	// 对于大文件上传，我们需要读取整个body内容
-	// 注意：这可能会消耗大量内存，但CycleTLS要求完整的body
-	bodyBytes, err := io.ReadAll(body)
-	if err != nil {
-		return nil, fmt.Errorf("读取上传数据失败: %v", err)
-	}
-
-	options := cycletls.Options{
-		Method:    method,
-		URL:       url,
-		Body:      string(bodyBytes),
-		Headers:   headers,
-		Timeout:   0, // 不设置超时，让大文件有足够时间上传
-		UserAgent: c.generateUserAgent(),
-		Ja3:       c.generateJA3(),
-	}
-
-	return c.DoRequest(ctx, options)
-}
-
-// CreateSession 创建一个持久会话，用于保持cookie和状态
-func (c *CycleTLSClient) CreateSession(sessionID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sessions[sessionID] = nil
-}
-
-// GetSession 获取会话信息
-func (c *CycleTLSClient) GetSession(sessionID string) *cycletls.Response {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.sessions[sessionID]
-}
-
-// UpdateSession 更新会话信息
-func (c *CycleTLSClient) UpdateSession(sessionID string, resp *cycletls.Response) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.sessions[sessionID] = resp
-}
-
-// DeleteSession 删除会话
-func (c *CycleTLSClient) DeleteSession(sessionID string) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	delete(c.sessions, sessionID)
 }

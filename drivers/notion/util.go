@@ -3,17 +3,12 @@ package notion
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
-	"mime/multipart"
 	"net/http"
 	"net/url"
-	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
@@ -24,9 +19,6 @@ import (
 
 const (
 	NotionAPIBaseURL = "https://www.notion.so/api/v3"
-	S3BaseURL        = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
-	MaxRetryAttempts = 3
-	BaseRetryDelay   = 1 * time.Second
 )
 
 func NewNotionService(cookie, token, spaceID, databaseID string, filePageID string) *NotionService {
@@ -125,34 +117,6 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 	return page.ID, nil
 }
 
-func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
-	record := RecordInfo{
-		Table:   "block",
-		ID:      id,
-		SpaceID: s.spaceID,
-	}
-	// 1. 上传文件到Notion
-	uploadResponse, err := s.UploadFile(filePath, record)
-	if err != nil {
-		return fmt.Errorf("上传文件失败: %v", err)
-	}
-
-	// 2. 上传文件到S3
-	err = s.UploadToS3(filePath, uploadResponse.Fields)
-	if err != nil {
-		return fmt.Errorf("上传到S3失败: %v", err)
-	}
-
-	fileName := strings.TrimSuffix(filepath.Base(filePath), filepath.Ext(filepath.Base(filePath)))
-	// 3. 更新文件状态
-	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
-	if err != nil {
-		return fmt.Errorf("更新文件状态失败: %v", err)
-	}
-
-	return nil
-}
-
 func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string, up driver.UpdateProgress) error {
 	record := RecordInfo{
 		Table:   "block",
@@ -225,56 +189,6 @@ func GetContentType(filename string) string {
 	}
 }
 
-func (s *NotionService) UploadFile(filePath string, recordInfo RecordInfo) (*UploadResponse, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return nil, fmt.Errorf("无法读取文件: %v", err)
-	}
-	// 去除文件后缀
-	fileName := strings.TrimSuffix(fileInfo.Name(), filepath.Ext(fileInfo.Name()))
-	reqBody := UploadFileRequest{
-		Bucket:              "secure",
-		Name:                fileName,
-		ContentType:         GetContentType(fileInfo.Name()),
-		Record:              recordInfo,
-		SupportExtraHeaders: true,
-		ContentLength:       fileInfo.Size(),
-	}
-
-	jsonData, err := json.Marshal(reqBody)
-	if err != nil {
-		return nil, err
-	}
-
-	req, err := http.NewRequest("POST", NotionAPIBaseURL+"/getUploadFileUrl", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return nil, err
-	}
-
-	s.setCommonHeaders(req)
-
-	client := &http.Client{}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	fmt.Printf("上传文件请求状态: %s\n", resp.Status)
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-
-	var uploadResponse UploadResponse
-	err = json.Unmarshal(body, &uploadResponse)
-	if err != nil {
-		return nil, err
-	}
-
-	return &uploadResponse, nil
-}
-
 func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo RecordInfo) (*UploadResponse, error) {
 	fileName := file.GetName()
 	reqBody := UploadFileRequest{
@@ -315,135 +229,6 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 	}
 
 	return &uploadResponse, nil
-}
-
-func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return fmt.Errorf("无法打开文件: %v", err)
-	}
-	defer file.Close()
-
-	// 获取文件大小
-	fileInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("获取文件信息失败: %v", err)
-	}
-	fileSize := fileInfo.Size()
-	// 创建带限速的文件流
-	rateLimited := io.LimitReader(file, fileSize)
-
-	// 创建 pipe，实现边写边读
-	pr, pw := io.Pipe()
-	writer := multipart.NewWriter(pw)
-
-	// 计算 multipart 表单的边界长度
-	boundary := writer.Boundary()
-	boundaryPrefix := "--" + boundary + "\r\n"
-	boundarySuffix := "\r\n--" + boundary + "--\r\n"
-	boundaryLength := len(boundaryPrefix) + len(boundarySuffix)
-
-	// 计算表单字段的总长度
-	fieldsLength := 0
-	// 每个字段的格式: Content-Disposition: form-data; name="fieldname"\r\n\r\nvalue\r\n
-	fieldHeader := "Content-Disposition: form-data; name=\""
-	fieldFooter := "\"\r\n\r\n"
-	fieldEnd := "\r\n"
-
-	fieldsLength += len(fieldHeader + "Content-Type" + fieldFooter + fields.ContentType + fieldEnd)
-	fieldsLength += len(fieldHeader + "x-amz-storage-class" + fieldFooter + fields.XAmzStorageClass + fieldEnd)
-	fieldsLength += len(fieldHeader + "tagging" + fieldFooter + fields.Tagging + fieldEnd)
-	fieldsLength += len(fieldHeader + "bucket" + fieldFooter + fields.Bucket + fieldEnd)
-	fieldsLength += len(fieldHeader + "X-Amz-Algorithm" + fieldFooter + fields.XAmzAlgorithm + fieldEnd)
-	fieldsLength += len(fieldHeader + "X-Amz-Credential" + fieldFooter + fields.XAmzCredential + fieldEnd)
-	fieldsLength += len(fieldHeader + "X-Amz-Date" + fieldFooter + fields.XAmzDate + fieldEnd)
-	fieldsLength += len(fieldHeader + "X-Amz-Security-Token" + fieldFooter + fields.XAmzSecurityToken + fieldEnd)
-	fieldsLength += len(fieldHeader + "key" + fieldFooter + fields.Key + fieldEnd)
-	fieldsLength += len(fieldHeader + "Policy" + fieldFooter + fields.Policy + fieldEnd)
-	fieldsLength += len(fieldHeader + "X-Amz-Signature" + fieldFooter + fields.XAmzSignature + fieldEnd)
-
-	// 计算文件字段的头部长度
-	fileHeader := "Content-Disposition: form-data; name=\"file\"; filename=\"" + filepath.Base(filePath) + "\"\r\n"
-	fileHeader += "Content-Type: " + fields.ContentType + "\r\n\r\n"
-	fileHeaderLength := len(fileHeader)
-
-	// 计算总长度
-	totalLength := int64(boundaryLength+fieldsLength+fileHeaderLength) + fileSize
-
-	// 创建错误通道
-	errChan := make(chan error, 1)
-
-	// 异步写入 multipart 数据
-	go func() {
-		defer pw.Close()
-		defer file.Close()
-
-		// 写字段
-		writer.WriteField("Content-Type", fields.ContentType)
-		writer.WriteField("x-amz-storage-class", fields.XAmzStorageClass)
-		writer.WriteField("tagging", fields.Tagging)
-		writer.WriteField("bucket", fields.Bucket)
-		writer.WriteField("X-Amz-Algorithm", fields.XAmzAlgorithm)
-		writer.WriteField("X-Amz-Credential", fields.XAmzCredential)
-		writer.WriteField("X-Amz-Date", fields.XAmzDate)
-		writer.WriteField("X-Amz-Security-Token", fields.XAmzSecurityToken)
-		writer.WriteField("key", fields.Key)
-		writer.WriteField("Policy", fields.Policy)
-		writer.WriteField("X-Amz-Signature", fields.XAmzSignature)
-
-		// 写入文件字段
-		part, err := writer.CreateFormFile("file", filepath.Base(filePath))
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("创建文件字段失败: %v", err))
-			return
-		}
-
-		// 使用带限速的文件流
-		_, err = io.Copy(part, rateLimited)
-		if err != nil {
-			pw.CloseWithError(fmt.Errorf("复制文件内容失败: %v", err))
-			return
-		}
-
-		writer.Close()
-	}()
-
-	// 创建请求
-	req, err := http.NewRequestWithContext(context.Background(), "POST", S3BaseURL, pr)
-	if err != nil {
-		return fmt.Errorf("创建请求失败: %v", err)
-	}
-
-	// 设置请求头
-	req.Header.Set("Content-Type", writer.FormDataContentType())
-	req.Header.Set("Content-Length", strconv.FormatInt(totalLength, 10))
-
-	// 创建带超时的客户端
-	client := &http.Client{
-		Timeout: 30 * time.Minute, // 设置较长的超时时间，适合大文件上传
-	}
-
-	// 发送请求
-	resp, err := client.Do(req)
-	if err != nil {
-		return fmt.Errorf("发送请求失败: %v", err)
-	}
-	defer resp.Body.Close()
-
-	// 检查是否有写入错误
-	select {
-	case err := <-errChan:
-		return err
-	default:
-	}
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
-	}
-
-	fmt.Printf("文件上传成功，状态码: %d\n", resp.StatusCode)
-	return nil
 }
 
 func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse, up driver.UpdateProgress) error {
@@ -567,38 +352,6 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 	return nil
 }
 
-func (s *NotionService) setCommonHeaders(req *http.Request) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-	req.Header.Set("notion-client-version", "23.13.0.4539")
-	req.Header.Set("notion-audit-log-platform", "web")
-	req.Header.Set("Cookie", s.cookie)
-	req.Header.Set("X-Notion-Active-User-Header", s.userId)
-	req.Header.Set("X-Notion-Space-Id", s.spaceID)
-}
-
-func (s *NotionService) setPutCommonHeaders(req *http.Request) {
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36")
-	// req.Header.Set("notion-client-version", "23.13.0.2948")
-	// req.Header.Set("notion-audit-log-platform", "web")
-	req.Header.Set("Cookie", s.cookie)
-	req.Header.Set("X-Notion-Active-User-Header", s.userId)
-	req.Header.Set("X-Notion-Space-Id", s.spaceID)
-
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
-	req.Header.Set("Origin", "https://www.notion.so")
-	req.Header.Set("Referer", "https://www.notion.so/")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
-	req.Header.Set("sec-ch-ua", `"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-}
-
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
 	//propertyID 转义
 	propertyIDNew := url.PathEscape(propertyID)
@@ -631,24 +384,6 @@ func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*Prop
 	}
 
 	return &propertyResponse, nil
-}
-
-// GetFileSize 获取文件大小
-func GetFileSize(filePath string) (int64, error) {
-	fileInfo, err := os.Stat(filePath)
-	if err != nil {
-		return 0, err
-	}
-	return fileInfo.Size(), nil
-}
-
-// IsDir 判断是否为目录
-func IsDir(path string) bool {
-	fileInfo, err := os.Stat(path)
-	if err != nil {
-		return false
-	}
-	return fileInfo.IsDir()
 }
 
 // UploadChunkToS3Put 专门用于分块的流式上传，避免缓存
@@ -760,115 +495,6 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 	}
 
 	return &uploadResponse, nil
-}
-
-// createAntiCFClient 创建反CloudFlare检测的HTTP客户端
-func createAntiCFClient() *http.Client {
-	// 创建自定义的Transport来绕过CF检测
-	tr := &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: false,
-			// 模拟Chrome的TLS指纹
-			MinVersion: tls.VersionTLS12,
-			MaxVersion: tls.VersionTLS13,
-			CipherSuites: []uint16{
-				tls.TLS_AES_128_GCM_SHA256,
-				tls.TLS_AES_256_GCM_SHA384,
-				tls.TLS_CHACHA20_POLY1305_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-				tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-			},
-		},
-		ForceAttemptHTTP2: true,
-	}
-
-	return &http.Client{
-		Transport: tr,
-		Timeout:   30 * time.Second,
-	}
-}
-
-// retryWithExponentialBackoff 实现指数退避重试机制
-func retryWithExponentialBackoff(operation func() (*http.Response, error), maxRetries int) (*http.Response, error) {
-	var lastErr error
-
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		resp, err := operation()
-
-		if err == nil && resp.StatusCode != 403 && resp.StatusCode != 503 {
-			return resp, nil
-		}
-
-		if resp != nil {
-			resp.Body.Close()
-		}
-		lastErr = err
-
-		if attempt < maxRetries {
-			// 计算退避时间：基础延时 * 2^重试次数 + 随机抖动
-			backoffTime := BaseRetryDelay * time.Duration(1<<uint(attempt))
-			jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
-			sleepTime := backoffTime + jitter
-
-			fmt.Printf("请求被CF拦截，第%d次重试，等待%v后重试\n", attempt+1, sleepTime)
-			time.Sleep(sleepTime)
-		}
-	}
-
-	if lastErr != nil {
-		return nil, fmt.Errorf("重试%d次后仍然失败: %v", maxRetries, lastErr)
-	}
-
-	return nil, fmt.Errorf("重试%d次后仍被CF拦截", maxRetries)
-}
-
-// setEnhancedAntiCFHeaders 设置增强的反CF检测请求头
-func setEnhancedAntiCFHeaders(req *http.Request, cookie, userId, spaceID string) {
-	// 基础请求头
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Cookie", cookie)
-	req.Header.Set("X-Notion-Active-User-Header", userId)
-	req.Header.Set("X-Notion-Space-Id", spaceID)
-
-	// 增强的浏览器模拟头
-	userAgents := []string{
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-		"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-	}
-
-	// 随机选择User-Agent
-	rand.Seed(time.Now().UnixNano())
-	selectedUA := userAgents[rand.Intn(len(userAgents))]
-	req.Header.Set("User-Agent", selectedUA)
-
-	// 设置完整的浏览器头信息
-	req.Header.Set("Accept", "*/*")
-	req.Header.Set("Accept-Language", "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7")
-	req.Header.Set("Accept-Encoding", "gzip, deflate, br, zstd")
-	req.Header.Set("Origin", "https://www.notion.so")
-	req.Header.Set("Referer", "https://www.notion.so/")
-
-	// Chrome特有的安全头
-	req.Header.Set("sec-ch-ua", `"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"`)
-	req.Header.Set("sec-ch-ua-mobile", "?0")
-	req.Header.Set("sec-ch-ua-platform", `"Windows"`)
-	req.Header.Set("sec-fetch-dest", "empty")
-	req.Header.Set("Sec-Fetch-Mode", "cors")
-	req.Header.Set("Sec-Fetch-Site", "same-origin")
-
-	// 连接相关头
-	req.Header.Set("Connection", "keep-alive")
-	req.Header.Set("Cache-Control", "no-cache")
-	req.Header.Set("Pragma", "no-cache")
-
-	// 添加一些随机性以避免检测
-	req.Header.Set("DNT", "1")
-	req.Header.Set("Upgrade-Insecure-Requests", "1")
 }
 
 // do others that not defined in Driver interface
