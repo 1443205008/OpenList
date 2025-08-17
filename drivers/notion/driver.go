@@ -80,6 +80,9 @@ func (d *Notion) Init(ctx context.Context) error {
 	d.notionClient = NewNotionService(d.NotionCookie, d.NotionToken, d.NotionSpaceID, d.NotionDatabaseID, d.NotionFilePageID)
 	d.db = db
 
+	// 启动时清理不完整的上传文件
+	go d.cleanupIncompleteUploads()
+
 	return nil
 }
 
@@ -527,11 +530,15 @@ func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize i
 	// 执行流式分块上传
 	chunks, err := streamUploader.Upload()
 	if err != nil {
+		// 上传失败，删除主文件记录和任何已创建的分块记录
+		d.cleanupFailedUpload(f.ID)
 		return nil, fmt.Errorf("流式分块上传失败: %v", err)
 	}
 
 	// 批量保存分块记录
 	if err := d.db.Create(&chunks).Error; err != nil {
+		// 保存分块记录失败，删除主文件记录
+		d.cleanupFailedUpload(f.ID)
 		return nil, fmt.Errorf("保存分块记录失败: %v", err)
 	}
 
@@ -558,6 +565,103 @@ func (d *Notion) Extract(ctx context.Context, obj model.Obj, args model.ArchiveI
 
 func (d *Notion) ArchiveDecompress(ctx context.Context, srcObj, dstDir model.Obj, args model.ArchiveDecompressArgs) ([]model.Obj, error) {
 	return nil, errs.NotImplement
+}
+
+// cleanupFailedUpload 清理失败的上传，删除主文件记录和相关的分块记录
+func (d *Notion) cleanupFailedUpload(fileID int) {
+	// 删除分块记录（如果存在）
+	if err := d.db.Where("file_id = ?", fileID).Delete(&FileChunk{}).Error; err != nil {
+		fmt.Printf("警告：清理分块记录失败: %v\n", err)
+	}
+
+	// 删除主文件记录
+	if err := d.db.Where("id = ?", fileID).Delete(&File{}).Error; err != nil {
+		fmt.Printf("警告：清理主文件记录失败: %v\n", err)
+	}
+}
+
+// cleanupIncompleteUploads 清理不完整的上传文件
+func (d *Notion) cleanupIncompleteUploads() {
+	// 等待5分钟后执行第一次清理
+	time.Sleep(5 * time.Minute)
+
+	ticker := time.NewTicker(30 * time.Minute) // 每30分钟执行一次清理
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			d.performCleanup()
+		}
+	}
+}
+
+// performCleanup 执行实际的清理操作
+func (d *Notion) performCleanup() {
+	// 清理超过1小时的分块文件，但没有对应分块记录的文件
+	cutoffTime := time.Now().Add(-1 * time.Hour)
+
+	var incompleteFiles []File
+	// 查找分块文件但没有分块记录的文件
+	err := d.db.Raw(`
+		SELECT f.* FROM files f
+		WHERE f.is_chunked = true 
+		AND f.deleted = false 
+		AND f.created_at < ?
+		AND NOT EXISTS (
+			SELECT 1 FROM file_chunks fc 
+			WHERE fc.file_id = f.id AND fc.deleted = false
+		)
+	`, cutoffTime).Scan(&incompleteFiles).Error
+
+	if err != nil {
+		fmt.Printf("警告：查询不完整文件失败: %v\n", err)
+		return
+	}
+
+	if len(incompleteFiles) > 0 {
+		fmt.Printf("发现%d个不完整的上传文件，开始清理...\n", len(incompleteFiles))
+
+		for _, file := range incompleteFiles {
+			// 删除不完整的文件记录
+			if err := d.db.Delete(&file).Error; err != nil {
+				fmt.Printf("警告：删除不完整文件记录失败 (ID: %d): %v\n", file.ID, err)
+			} else {
+				fmt.Printf("已清理不完整文件: %s (ID: %d)\n", file.Name, file.ID)
+			}
+		}
+	}
+
+	// 清理孤立的分块记录（主文件记录已删除但分块记录仍存在）
+	var orphanedChunks []FileChunk
+	err = d.db.Raw(`
+		SELECT fc.* FROM file_chunks fc
+		WHERE fc.deleted = false
+		AND fc.created_at < ?
+		AND NOT EXISTS (
+			SELECT 1 FROM files f
+			WHERE f.id = fc.file_id AND f.deleted = false
+		)
+	`, cutoffTime).Scan(&orphanedChunks).Error
+
+	if err != nil {
+		fmt.Printf("警告：查询孤立分块失败: %v\n", err)
+		return
+	}
+
+	if len(orphanedChunks) > 0 {
+		fmt.Printf("发现%d个孤立的分块记录，开始清理...\n", len(orphanedChunks))
+
+		for _, chunk := range orphanedChunks {
+			// 删除孤立的分块记录
+			if err := d.db.Delete(&chunk).Error; err != nil {
+				fmt.Printf("警告：删除孤立分块记录失败 (ID: %d): %v\n", chunk.ID, err)
+			} else {
+				fmt.Printf("已清理孤立分块记录: FileID=%d, ChunkIndex=%d (ID: %d)\n",
+					chunk.FileID, chunk.ChunkIndex, chunk.ID)
+			}
+		}
+	}
 }
 
 var _ driver.Driver = (*Notion)(nil)

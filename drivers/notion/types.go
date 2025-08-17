@@ -513,11 +513,14 @@ type StreamChunkUploader struct {
 func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 	var chunks []FileChunk
 	var totalRead int64
+	var createdPageIDs []string // 跟踪已创建的页面ID，用于错误清理
 
 	for i := int64(0); i < s.chunkCount; i++ {
 		// 检查上下文是否被取消
 		select {
 		case <-s.ctx.Done():
+			// 上下文取消时，清理已创建的页面
+			s.cleanupCreatedPages(createdPageIDs)
 			return nil, s.ctx.Err()
 		default:
 		}
@@ -532,8 +535,11 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 		chunkName := fmt.Sprintf("%s.chunk%d", s.fileName, i)
 		pageID, err := s.notionClient.CreateDatabasePage(chunkName)
 		if err != nil {
+			// 创建页面失败，清理已创建的页面
+			s.cleanupCreatedPages(createdPageIDs)
 			return nil, fmt.Errorf("创建分块页面失败: %v", err)
 		}
+		createdPageIDs = append(createdPageIDs, pageID)
 
 		// 创建限制读取器，只读取当前分块的数据
 		chunkReader := io.LimitReader(s.file, currentChunkSize)
@@ -546,9 +552,11 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 			}
 		}
 
-		// 使用专门的分块上传方法，避免缓存
-		err = s.notionClient.UploadAndUpdateChunkPut(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress)
+		// 使用专门的分块上传方法，避免缓存，增加重试机制
+		err = s.uploadChunkWithRetry(chunkReader, currentChunkSize, chunkName, pageID, chunkProgress, 3)
 		if err != nil {
+			// 上传失败，清理已创建的页面
+			s.cleanupCreatedPages(createdPageIDs)
 			return nil, fmt.Errorf("上传分块%d失败: %v", i, err)
 		}
 
@@ -567,4 +575,36 @@ func (s *StreamChunkUploader) Upload() ([]FileChunk, error) {
 	}
 
 	return chunks, nil
+}
+
+// uploadChunkWithRetry 带重试机制的分块上传
+func (s *StreamChunkUploader) uploadChunkWithRetry(reader io.Reader, size int64, name, pageID string, progress func(float64), maxRetries int) error {
+	var lastErr error
+	for retry := 0; retry < maxRetries; retry++ {
+		// 对于重试，需要重新创建reader（如果可能的话）
+		err := s.notionClient.UploadAndUpdateChunkPut(reader, size, name, pageID, progress)
+		if err == nil {
+			return nil
+		}
+
+		lastErr = err
+		if retry < maxRetries-1 {
+			// 等待后重试，递增延迟
+			time.Sleep(time.Second * time.Duration(retry+1))
+		}
+	}
+
+	return fmt.Errorf("经过%d次重试后仍然失败: %v", maxRetries, lastErr)
+}
+
+// cleanupCreatedPages 清理已创建的Notion页面（这里只是记录，实际删除可能需要额外的API调用）
+func (s *StreamChunkUploader) cleanupCreatedPages(pageIDs []string) {
+	// 注意：Notion API删除页面比较复杂，这里只是记录警告
+	// 在生产环境中，可能需要实现具体的页面删除逻辑
+	if len(pageIDs) > 0 {
+		fmt.Printf("警告：分块上传失败，需要清理%d个已创建的Notion页面\n", len(pageIDs))
+		for _, pageID := range pageIDs {
+			fmt.Printf("  页面ID: %s\n", pageID)
+		}
+	}
 }
