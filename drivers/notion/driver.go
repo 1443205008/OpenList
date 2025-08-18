@@ -42,7 +42,7 @@ func (d *Notion) GetAddition() driver.Additional {
 
 func (d *Notion) Init(ctx context.Context) error {
 	// 初始化数据库连接
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local&sslMode=VERIFY_IDENTITY",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local&tls=true",
 		d.DBUser, d.DBPass, d.DBHost, d.DBPort, d.DBName)
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
 	if err != nil {
