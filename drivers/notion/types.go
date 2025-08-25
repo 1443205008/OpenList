@@ -36,8 +36,8 @@ type FileInfo struct {
 type Directory struct {
 	ID         int       `json:"id" gorm:"primaryKey"`
 	Name       string    `json:"name"`
-	ParentID   *int      `json:"parent_id" gorm:"index"`
-	DatabaseID string    `json:"database_id" gorm:"index"`
+	ParentID   *int      `json:"parent_id"`
+	DatabaseID string    `json:"database_id"`
 	Deleted    bool      `json:"deleted" gorm:"default:false"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
@@ -48,7 +48,7 @@ type File struct {
 	Name         string    `json:"name"`
 	Size         int64     `json:"size"`
 	NotionPageID string    `json:"notion_page_id"`
-	DirectoryID  int       `json:"directory_id" gorm:"index"`
+	DirectoryID  int       `json:"directory_id"`
 	IsChunked    bool      `json:"is_chunked" gorm:"default:false"`
 	ChunkSize    int64     `json:"chunk_size" gorm:"default:0"`
 	Deleted      bool      `json:"deleted" gorm:"default:false"`
@@ -59,7 +59,7 @@ type File struct {
 // FileChunk 存储文件分块信息
 type FileChunk struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
-	FileID       int       `json:"file_id" gorm:"index"`
+	FileID       int       `json:"file_id"`
 	ChunkIndex   int       `json:"chunk_index"`
 	ChunkSize    int64     `json:"chunk_size"`
 	StartOffset  int64     `json:"start_offset"`
