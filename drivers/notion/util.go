@@ -249,7 +249,7 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 	for _, header := range resp.PutHeaders {
 		req.Header.Set(header.Name, header.Value)
 	}
-	req.Header.Set("Content-Type", "application/octet-stream")
+	// req.Header.Set("Content-Type", "application/octet-stream")
 	// 手动设置 Content-Length
 	req.ContentLength = file.GetSize()
 
@@ -267,7 +267,7 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 		body, _ := io.ReadAll(response.Body)
 		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
-	// fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
+	fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
 	return nil
 }
 
