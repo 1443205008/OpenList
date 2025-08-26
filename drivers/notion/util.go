@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		SpaceID: s.spaceID,
 	}
 	// 1. 上传文件到Notion
-	uploadResponse, err := s.UploadFilePut(file, record)
+	uploadResponse, err := s.UploadFilePutWithCurl(file, record)
 	if err != nil {
 		return fmt.Errorf("上传文件失败: %v", err)
 	}
@@ -135,13 +136,13 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
-	//fileName := file.GetName()
+	fileName := file.GetName()
 	// 3. 更新文件状态
-	//err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 
-	// if err != nil {
-	// 	return fmt.Errorf("更新文件状态失败: %v", err)
-	// }
+	if err != nil {
+		return fmt.Errorf("更新文件状态失败: %v", err)
+	}
 
 	return nil
 }
@@ -495,6 +496,269 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 	}
 
 	return &uploadResponse, nil
+}
+
+// UploadFilePutWithCurl 使用系统curl命令发送请求的版本，不依赖cycleTLSClient
+func (s *NotionService) UploadFilePutWithCurl(file model.FileStreamer, recordInfo RecordInfo) (*UploadResponse, error) {
+	fileName := file.GetName()
+	reqBody := UploadFileRequest{
+		Bucket:              "secure",
+		Name:                fileName,
+		ContentType:         file.GetMimetype(),
+		Record:              recordInfo,
+		SupportExtraHeaders: true,
+		ContentLength:       file.GetSize(),
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	// 构建curl命令和参数
+	curlCmd, err := s.buildCurlCommand("POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData)
+	if err != nil {
+		return nil, fmt.Errorf("构建curl命令失败: %v", err)
+	}
+
+	// 执行curl命令
+	output, err := s.executeCurlCommand(curlCmd)
+	if err != nil {
+		return nil, fmt.Errorf("执行curl命令失败: %v", err)
+	}
+
+	fmt.Printf("上传文件curl响应: %s\n", output)
+
+	var uploadResponse UploadResponse
+	err = json.Unmarshal([]byte(output), &uploadResponse)
+	if err != nil {
+		return nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	return &uploadResponse, nil
+}
+
+// buildCurlCommand 构建curl命令和参数
+func (s *NotionService) buildCurlCommand(method, url string, body []byte) ([]string, error) {
+	args := []string{
+		"curl",
+		"-X", method,
+		"-H", "Content-Type: application/json",
+		"-H", "Cookie: " + s.cookie,
+		"-H", "X-Notion-Active-User-Header: " + s.userId,
+		"-H", "X-Notion-Space-Id: " + s.spaceID,
+	}
+
+	// 添加请求体
+	if body != nil && len(body) > 0 {
+		args = append(args, "-d", string(body))
+	}
+
+	// 添加URL
+	args = append(args, url)
+
+	return args, nil
+}
+
+// executeCurlCommand 执行curl命令并返回响应
+func (s *NotionService) executeCurlCommand(args []string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, args[0], args[1:]...)
+
+	// 捕获标准输出和标准错误
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+
+	err := cmd.Run()
+	if err != nil {
+		return "", fmt.Errorf("curl命令执行失败: %v, stderr: %s", err, stderr.String())
+	}
+
+	output := stdout.String()
+	if output == "" {
+		return "", fmt.Errorf("curl命令返回空响应")
+	}
+
+	return output, nil
+}
+
+// UpdateFileStatusWithCurl 使用curl更新文件状态的版本
+func (s *NotionService) UpdateFileStatusWithCurl(record RecordInfo, fileName string, fileURL string) error {
+	requestID := uuid.New().String()
+	transactionID := uuid.New().String()
+	currentTime := time.Now().UnixMilli()
+
+	reqBody := UpdateFileStatusRequest{
+		RequestID: requestID,
+		Transactions: []Transaction{
+			{
+				ID:      transactionID,
+				SpaceID: record.SpaceID,
+				Debug: DebugInfo{
+					UserAction: "BlockPropertyValueOverlay.renderFile",
+				},
+				Ops: []Operation{
+					{
+						Pointer: Pointer{
+							ID:      record.ID,
+							Table:   record.Table,
+							SpaceID: record.SpaceID,
+						},
+						Path:    []string{"properties", s.filePageID},
+						Command: "set",
+						Args: []interface{}{
+							[]interface{}{
+								fileName,
+								[]interface{}{
+									[]interface{}{
+										"a",
+										fileURL,
+									},
+								},
+							},
+						},
+					},
+					{
+						Pointer: Pointer{
+							ID:      record.ID,
+							Table:   record.Table,
+							SpaceID: record.SpaceID,
+						},
+						Path:    []string{},
+						Command: "update",
+						Args: map[string]interface{}{
+							"last_edited_time":     currentTime,
+							"last_edited_by_id":    s.userId,
+							"last_edited_by_table": "notion_user",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("序列化请求体失败: %v", err)
+	}
+
+	// 构建curl命令
+	curlCmd, err := s.buildCurlCommand("POST", NotionAPIBaseURL+"/saveTransactionsFanout", jsonData)
+	if err != nil {
+		return fmt.Errorf("构建curl命令失败: %v", err)
+	}
+
+	// 执行curl命令
+	output, err := s.executeCurlCommand(curlCmd)
+	if err != nil {
+		return fmt.Errorf("更新文件状态curl命令失败: %v", err)
+	}
+
+	// 检查响应是否成功（这里假设成功的响应不为空）
+	if output == "" {
+		return fmt.Errorf("更新文件状态失败: 空响应")
+	}
+
+	return nil
+}
+
+// UploadAndUpdateFilePutWithCurl 使用curl的完整上传和更新流程
+func (s *NotionService) UploadAndUpdateFilePutWithCurl(file model.FileStreamer, id string, up driver.UpdateProgress) error {
+	record := RecordInfo{
+		Table:   "block",
+		ID:      id,
+		SpaceID: s.spaceID,
+	}
+
+	// 1. 使用curl上传文件到Notion获取上传URL
+	uploadResponse, err := s.UploadFilePutWithCurl(file, record)
+	if err != nil {
+		return fmt.Errorf("使用curl上传文件失败: %v", err)
+	}
+
+	// 2. 上传文件到S3 (这部分保持不变，因为直接使用HTTP客户端更合适)
+	err = s.UploadToS3Put(file, uploadResponse, up)
+	if err != nil {
+		return fmt.Errorf("上传到S3失败: %v", err)
+	}
+
+	fileName := file.GetName()
+	// 3. 使用curl更新文件状态
+	err = s.UpdateFileStatusWithCurl(record, fileName, uploadResponse.URL)
+	if err != nil {
+		return fmt.Errorf("使用curl更新文件状态失败: %v", err)
+	}
+
+	return nil
+}
+
+// UploadChunkFilePutWithCurl 使用curl为分块上传获取上传URL
+func (s *NotionService) UploadChunkFilePutWithCurl(name string, size int64, recordInfo RecordInfo) (*UploadResponse, error) {
+	reqBody := UploadFileRequest{
+		Bucket:              "secure",
+		Name:                name,
+		ContentType:         "application/octet-stream",
+		Record:              recordInfo,
+		SupportExtraHeaders: true,
+		ContentLength:       size,
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	// 构建curl命令
+	curlCmd, err := s.buildCurlCommand("POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData)
+	if err != nil {
+		return nil, fmt.Errorf("构建curl命令失败: %v", err)
+	}
+
+	// 执行curl命令
+	output, err := s.executeCurlCommand(curlCmd)
+	if err != nil {
+		return nil, fmt.Errorf("获取分块上传URL失败: %v", err)
+	}
+
+	var uploadResponse UploadResponse
+	err = json.Unmarshal([]byte(output), &uploadResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	return &uploadResponse, nil
+}
+
+// UploadAndUpdateChunkPutWithCurl 使用curl的分块上传方法
+func (s *NotionService) UploadAndUpdateChunkPutWithCurl(reader io.Reader, size int64, name string, id string, up driver.UpdateProgress) error {
+	record := RecordInfo{
+		Table:   "block",
+		ID:      id,
+		SpaceID: s.spaceID,
+	}
+
+	// 1. 使用curl获取上传URL
+	uploadResponse, err := s.UploadChunkFilePutWithCurl(name, size, record)
+	if err != nil {
+		return fmt.Errorf("使用curl获取上传URL失败: %v", err)
+	}
+
+	// 2. 直接上传到S3 (保持使用HTTP客户端，因为更适合大文件流式上传)
+	err = s.UploadChunkToS3Put(reader, size, uploadResponse, up)
+	if err != nil {
+		return fmt.Errorf("上传到S3失败: %v", err)
+	}
+
+	// 3. 使用curl更新文件状态
+	err = s.UpdateFileStatusWithCurl(record, name, uploadResponse.URL)
+	if err != nil {
+		return fmt.Errorf("使用curl更新文件状态失败: %v", err)
+	}
+
+	return nil
 }
 
 // do others that not defined in Driver interface
