@@ -468,6 +468,10 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 		return nil, fmt.Errorf("创建Notion页面失败: %v", err)
 	}
 
+	fmt.Printf("页面id：%s", pageID)
+
+	time.Sleep(2000)
+
 	// 上传文件到Notion
 	err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
 	if err != nil {
