@@ -135,13 +135,13 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
-	fileName := file.GetName()
+	//fileName := file.GetName()
 	// 3. 更新文件状态
-	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+	//err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 
-	if err != nil {
-		return fmt.Errorf("更新文件状态失败: %v", err)
-	}
+	// if err != nil {
+	// 	return fmt.Errorf("更新文件状态失败: %v", err)
+	// }
 
 	return nil
 }
