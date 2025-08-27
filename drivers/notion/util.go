@@ -122,6 +122,73 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 	return page.ID, nil
 }
 
+// CreateDatabasePageWithCurl 使用curl发送请求创建数据库页面的版本
+func (s *NotionService) CreateDatabasePageWithCurl(title string) (string, error) {
+	// 构建请求体
+	reqBody := CreatePageRequest{
+		Parent: Parent{
+			DatabaseID: s.databaseID,
+		},
+		Properties: Properties{
+			Title: TitleProperty{
+				Title: []TitleText{
+					{
+						Text: TextContent{
+							Content: title,
+						},
+					},
+				},
+			},
+			File: FileProperty{
+				File: []FileObject{},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", fmt.Errorf("序列化请求体失败: %v", err)
+	}
+
+	fmt.Printf("创建页面请求体: %s\n", string(jsonData))
+
+	// 构建curl命令
+	curlCmd := []string{
+		"curl",
+		"-X", "POST",
+		"-H", "Authorization: Bearer " + s.token,
+		"-H", "Notion-Version: 2022-06-28",
+		"-H", "Content-Type: application/json",
+		"-d", string(jsonData),
+		"https://api.notion.com/v1/pages",
+	}
+
+	// 执行curl命令
+	cmd := exec.Command(curlCmd[0], curlCmd[1:]...)
+	output, err := cmd.Output()
+	if err != nil {
+		if exitError, ok := err.(*exec.ExitError); ok {
+			return "", fmt.Errorf("curl命令执行失败: %v, stderr: %s", err, string(exitError.Stderr))
+		}
+		return "", fmt.Errorf("curl命令执行失败: %v", err)
+	}
+
+	fmt.Printf("curl响应: %s\n", string(output))
+
+	// 解析响应
+	var page CreatePageResponse
+	err = json.Unmarshal(output, &page)
+	if err != nil {
+		return "", fmt.Errorf("解析响应体失败: %v, 响应内容: %s", err, string(output))
+	}
+
+	if page.ID == "" {
+		return "", fmt.Errorf("创建页面失败，响应中没有页面ID: %s", string(output))
+	}
+
+	return page.ID, nil
+}
+
 func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string, up driver.UpdateProgress) error {
 	record := RecordInfo{
 		Table:   "block",
@@ -129,22 +196,22 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		SpaceID: s.spaceID,
 	}
 	// 1. 上传文件到Notion
-	_, err := s.UploadFilePut(file, record)
+	uploadResponse, err := s.UploadFilePutWithCurl(file, record)
 	if err != nil {
 		return fmt.Errorf("上传文件失败: %v", err)
 	}
-	// // 2. 上传文件到S3
-	// err = s.UploadToS3Put(file, uploadResponse, up)
-	// if err != nil {
-	// 	return fmt.Errorf("上传到S3失败: %v", err)
-	// }
-	// fileName := file.GetName()
-	// // 3. 更新文件状态
-	// err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+	// 2. 上传文件到S3
+	err = s.UploadToS3Put(file, uploadResponse, up)
+	if err != nil {
+		return fmt.Errorf("上传到S3失败: %v", err)
+	}
+	fileName := file.GetName()
+	// 3. 更新文件状态
+	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 
-	// if err != nil {
-	// 	return fmt.Errorf("更新文件状态失败: %v", err)
-	// }
+	if err != nil {
+		return fmt.Errorf("更新文件状态失败: %v", err)
+	}
 
 	return nil
 }
