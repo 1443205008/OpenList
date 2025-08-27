@@ -77,6 +77,9 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 					},
 				},
 			},
+			File: FileProperty{
+				File: []FileObject{},
+			},
 		},
 	}
 

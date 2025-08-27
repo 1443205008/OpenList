@@ -172,6 +172,11 @@ type Parent struct {
 
 type Properties struct {
 	Title TitleProperty `json:"Title"`
+	File  FileProperty  `json:"文件和媒体"`
+}
+
+type FileProperty struct {
+	File []FileObject `json:"files"`
 }
 
 type TitleProperty struct {
