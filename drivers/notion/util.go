@@ -128,18 +128,19 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		ID:      id,
 		SpaceID: s.spaceID,
 	}
+	time.Sleep(time.Second * 5)
 	// 1. 上传文件到Notion
 	uploadResponse, err := s.UploadFilePut(file, record)
 	if err != nil {
 		return fmt.Errorf("上传文件失败: %v", err)
 	}
-
+	time.Sleep(time.Second * 5)
 	// 2. 上传文件到S3
 	err = s.UploadToS3Put(file, uploadResponse, up)
 	if err != nil {
 		return fmt.Errorf("上传到S3失败: %v", err)
 	}
-
+	time.Sleep(time.Second * 5)
 	fileName := file.GetName()
 	// 3. 更新文件状态
 	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
