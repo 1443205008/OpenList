@@ -85,6 +85,7 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 		return "", fmt.Errorf("序列化请求体失败: %v", err)
 	}
 
+	fmt.Printf("创建页面请求体: %s\n", string(jsonData))
 	req, err := http.NewRequest("POST", "https://api.notion.com/v1/pages", bytes.NewBuffer(jsonData))
 	if err != nil {
 		return "", fmt.Errorf("创建请求失败: %v", err)
