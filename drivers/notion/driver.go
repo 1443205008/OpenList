@@ -463,10 +463,15 @@ func (d *Notion) Put(ctx context.Context, dstDir model.Obj, file model.FileStrea
 // putSingleFile 上传单个文件（小于5GB）
 func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize int64, dirID int, file model.FileStreamer, up driver.UpdateProgress) (model.Obj, error) {
 	// 创建Notion页面
-	pageID, err := d.notionClient.UploadAndUpdateFilePutByPython(file, up)
+	pageID, err := d.notionClient.CreateDatabasePage(fileName)
 	if err != nil {
-		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
+		return nil, fmt.Errorf("创建Notion页面失败: %v", err)
 	}
+
+	fmt.Printf("页面id：%s", pageID)
+
+	// 上传文件到Notion
+	err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
 
 	// 保存到数据库
 	f := &File{

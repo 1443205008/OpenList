@@ -311,6 +311,8 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 	// 使用CycleTLS发送请求
 	ctx := context.Background()
 	resp, err := s.cycleTLSClient.DoNotionAPIRequest(ctx, "POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData, headers)
+	time.Sleep(time.Second * 3)
+	resp, err = s.cycleTLSClient.DoNotionAPIRequest(ctx, "POST", NotionAPIBaseURL+"/getUploadFileUrl", jsonData, headers)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件请求失败: %v", err)
 	}
