@@ -196,7 +196,7 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		SpaceID: s.spaceID,
 	}
 	// 1. 上传文件到Notion
-	uploadResponse, err := s.UploadFilePutWithCurl(file, record)
+	uploadResponse, err := s.UploadFilePut(file, record)
 	if err != nil {
 		return fmt.Errorf("上传文件失败: %v", err)
 	}
