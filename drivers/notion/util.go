@@ -216,6 +216,32 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	return nil
 }
 
+func (s *NotionService) UploadAndUpdateFilePutByPython(file model.FileStreamer, up driver.UpdateProgress) (string, error) {
+	pageInfo, uploadResponse, err := s.GetUpLoadByPython(file)
+	record := RecordInfo{
+		Table:   "block",
+		ID:      pageInfo.ID,
+		SpaceID: s.spaceID,
+	}
+	if err != nil {
+		return "", fmt.Errorf("上传文件失败: %v", err)
+	}
+	// 2. 上传文件到S3
+	err = s.UploadToS3Put(file, uploadResponse, up)
+	if err != nil {
+		return "", fmt.Errorf("上传到S3失败: %v", err)
+	}
+	fileName := file.GetName()
+	// 3. 更新文件状态
+	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
+
+	if err != nil {
+		return "", fmt.Errorf("更新文件状态失败: %v", err)
+	}
+
+	return pageInfo.ID, nil
+}
+
 // GetContentType 根据文件后缀获取ContentType
 func GetContentType(filename string) string {
 	ext := strings.ToLower(filepath.Ext(filename))
@@ -828,6 +854,103 @@ func (s *NotionService) UploadAndUpdateChunkPutWithCurl(reader io.Reader, size i
 	}
 
 	return nil
+}
+
+// UploadFilePutViaPython 通过Python服务获取上传URL
+func (s *NotionService) GetUpLoadByPython(file model.FileStreamer) (*CreatePageResponse, *UploadResponse, error) {
+
+	// 构建请求数据
+	requestData := map[string]interface{}{
+		"authorization":               "Bearer " + s.token,
+		"database_id":                 s.databaseID,
+		"x_notion_active_user_header": s.userId,
+		"x_notion_space_id":           s.spaceID,
+		"cookie":                      s.cookie,
+		"filename":                    file.GetName(),
+		"filesize":                    file.GetSize(),
+		"content_type":                file.GetMimetype(),
+	}
+
+	jsonData, err := json.Marshal(requestData)
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化请求数据失败: %v", err)
+	}
+
+	// 调用Python服务的GetUpload接口
+	pythonURL := "http://localhost:8006/GetUpload"
+	req, err := http.NewRequest("POST", pythonURL, bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, nil, fmt.Errorf("创建HTTP请求失败: %v", err)
+	}
+
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("调用Python服务失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("Python服务返回错误,状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, nil, fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	var result map[string]interface{}
+	err = json.Unmarshal(body, &result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("解析响应失败: %v", err)
+	}
+
+	// 检查是否成功
+	if success, ok := result["success"].(bool); !ok || !success {
+		errorMsg := "未知错误"
+		if msg, ok := result["error"].(string); ok {
+			errorMsg = msg
+		}
+		return nil, nil, fmt.Errorf("Python服务执行失败: %s", errorMsg)
+	}
+
+	// 提取上传信息
+	uploadInfo, ok := result["upload_info"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("响应中缺少upload_info")
+	}
+
+	// 将上传信息转换为UploadResponse结构
+	uploadBytes, err := json.Marshal(uploadInfo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化上传信息失败: %v", err)
+	}
+
+	var uploadResponse UploadResponse
+	err = json.Unmarshal(uploadBytes, &uploadResponse)
+	if err != nil {
+		return nil, nil, fmt.Errorf("解析上传响应失败: %v", err)
+	}
+
+	pageInfo, ok := result["page_info"].(map[string]interface{})
+	if !ok {
+		return nil, nil, fmt.Errorf("响应中缺少page_info")
+	}
+	pageBytes, err := json.Marshal(pageInfo)
+	if err != nil {
+		return nil, nil, fmt.Errorf("序列化页面信息失败: %v", err)
+	}
+	var page CreatePageResponse
+	err = json.Unmarshal(pageBytes, &page)
+	if err != nil {
+		return nil, nil, fmt.Errorf("解析页面响应失败: %v", err)
+	}
+
+	fmt.Printf("通过Python服务获取上传URL成功\n")
+	return &page, &uploadResponse, nil
 }
 
 // do others that not defined in Driver interface
