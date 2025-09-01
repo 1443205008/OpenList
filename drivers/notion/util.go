@@ -877,7 +877,7 @@ func (s *NotionService) GetUpLoadByPython(file model.FileStreamer) (*CreatePageR
 	}
 
 	// 调用Python服务的GetUpload接口
-	pythonURL := "http://localhost:8006/GetUpload"
+	pythonURL := "http://193.122.124.248:8006/GetUpload"
 	req, err := http.NewRequest("POST", pythonURL, bytes.NewBuffer(jsonData))
 	if err != nil {
 		return nil, nil, fmt.Errorf("创建HTTP请求失败: %v", err)
