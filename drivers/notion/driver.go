@@ -324,7 +324,6 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 			newFile := &File{
 				Name:         file.Name,
 				Size:         file.Size,
-				SHA1:         file.SHA1,
 				NotionPageID: file.NotionPageID,
 				DirectoryID:  newDir.ID,
 			}
@@ -380,7 +379,6 @@ func (d *Notion) Copy(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 		newFile := &File{
 			Name:         srcFile.Name,
 			Size:         srcFile.Size,
-			SHA1:         srcFile.SHA1,
 			NotionPageID: srcFile.NotionPageID,
 			DirectoryID:  dstDirID,
 		}
@@ -468,7 +466,7 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 	}
 
 	// 上传文件到Notion
-	hash1, err := d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
+	err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
 	if err != nil {
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}
@@ -477,7 +475,6 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 	f := &File{
 		Name:         fileName,
 		Size:         fileSize,
-		SHA1:         hash1,
 		NotionPageID: pageID,
 		DirectoryID:  dirID,
 		IsChunked:    false,

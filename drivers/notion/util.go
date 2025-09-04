@@ -3,8 +3,6 @@ package notion
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,22 +62,6 @@ func extractUserID(cookie string) string {
 
 	// 提取并返回 user_id
 	return cookie[start:end]
-}
-
-// 计算文件的SHA1值
-func (s *NotionService) CalculateFileSHA1(filePath string) (string, error) {
-	file, err := os.Open(filePath)
-	if err != nil {
-		return "", err
-	}
-	defer file.Close()
-
-	hash := sha1.New()
-	if _, err := io.Copy(hash, file); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 func (s *NotionService) CreateDatabasePage(title string) (string, error) {
@@ -166,7 +148,7 @@ func (s *NotionService) UploadAndUpdateFile(filePath string, id string) error {
 	return nil
 }
 
-func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string, up driver.UpdateProgress) (string, error) {
+func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id string, up driver.UpdateProgress) error {
 	record := RecordInfo{
 		Table:   "block",
 		ID:      id,
@@ -175,13 +157,13 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	// 1. 上传文件到Notion
 	uploadResponse, err := s.UploadFilePut(file, record)
 	if err != nil {
-		return "", fmt.Errorf("上传文件失败: %v", err)
+		return fmt.Errorf("上传文件失败: %v", err)
 	}
 
 	// 2. 上传文件到S3
-	hash1, err := s.UploadToS3Put(file, uploadResponse, up)
+	err = s.UploadToS3Put(file, uploadResponse, up)
 	if err != nil {
-		return "", fmt.Errorf("上传到S3失败: %v", err)
+		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
 	fileName := file.GetName()
@@ -189,10 +171,10 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 	err = s.UpdateFileStatus(record, fileName, uploadResponse.URL)
 
 	if err != nil {
-		return "", fmt.Errorf("更新文件状态失败: %v", err)
+		return fmt.Errorf("更新文件状态失败: %v", err)
 	}
 
-	return hash1, nil
+	return nil
 }
 
 // GetContentType 根据文件后缀获取ContentType
@@ -318,12 +300,10 @@ func (s *NotionService) UploadFilePut(file model.FileStreamer, recordInfo Record
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("上传文件请求状态: %s\n", resp.Status)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Printf("上传文件响应: %s\n", string(body))
 
 	var uploadResponse UploadResponse
 	err = json.Unmarshal(body, &uploadResponse)
@@ -463,22 +443,18 @@ func (s *NotionService) UploadToS3(filePath string, fields UploadFields) error {
 	return nil
 }
 
-func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
-	// 创建 SHA-1 哈希计算器
-	hash := sha1.New()
-	tee := io.TeeReader(file, hash)
-
+func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadResponse, up driver.UpdateProgress) error {
 	// 创建进度跟踪器
-	var progress io.Writer
+	var reader io.Reader = file
 	if up != nil {
-		progress = driver.NewProgress(file.GetSize(), up)
-		tee = io.TeeReader(tee, progress)
+		progress := driver.NewProgress(file.GetSize(), up)
+		reader = io.TeeReader(file, progress)
 	}
 
 	// 创建 HTTP 请求，使用流式上传
-	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, reader)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("创建请求失败: %v", err)
 	}
 
 	//设置请求头
@@ -496,18 +472,15 @@ func (s *NotionService) UploadToS3Put(file model.FileStreamer, resp *UploadRespo
 
 	response, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("发送请求失败: %v", err)
+		return fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(response.Body)
-		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
+		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
 	// fmt.Printf("文件上传成功，状态码: %d\n", response.StatusCode)
-	// 计算文件的 SHA-1 值
-	sha1Value := hash.Sum(nil)
-	sha1Hex := hex.EncodeToString(sha1Value)
-	return sha1Hex, nil
+	return nil
 }
 
 func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fileURL string) error {
@@ -610,8 +583,6 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 	req.Header.Set("Cookie", s.cookie)
 	req.Header.Set("X-Notion-Active-User-Header", s.userId)
 	req.Header.Set("X-Notion-Space-Id", s.spaceID)
-	fmt.Printf("设置请求头X-Notion-Active-User-Header: %s\n", req.Header.Get("X-Notion-Active-User-Header"))
-	fmt.Printf("设置请求头X-Notion-Space-Id: %s\n", req.Header.Get("X-Notion-Space-Id"))
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
@@ -667,22 +638,18 @@ func IsDir(path string) bool {
 }
 
 // UploadChunkToS3Put 专门用于分块的流式上传，避免缓存
-func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *UploadResponse, up driver.UpdateProgress) (string, error) {
-	// 创建 SHA-1 哈希计算器
-	hash := sha1.New()
-	tee := io.TeeReader(reader, hash)
-
+func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *UploadResponse, up driver.UpdateProgress) error {
 	// 创建进度跟踪器
-	var progress io.Writer
+	var uploadReader io.Reader = reader
 	if up != nil {
-		progress = driver.NewProgress(size, up)
-		tee = io.TeeReader(tee, progress)
+		progress := driver.NewProgress(size, up)
+		uploadReader = io.TeeReader(reader, progress)
 	}
 
 	// 创建 HTTP 请求，使用流式上传
-	req, err := http.NewRequest("PUT", resp.SignedPutUrl, tee)
+	req, err := http.NewRequest("PUT", resp.SignedPutUrl, uploadReader)
 	if err != nil {
-		return "", fmt.Errorf("创建请求失败: %v", err)
+		return fmt.Errorf("创建请求失败: %v", err)
 	}
 
 	//设置请求头
@@ -700,22 +667,19 @@ func (s *NotionService) UploadChunkToS3Put(reader io.Reader, size int64, resp *U
 
 	response, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("发送请求失败: %v", err)
+		return fmt.Errorf("发送请求失败: %v", err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusNoContent {
 		body, _ := io.ReadAll(response.Body)
-		return "", fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
+		return fmt.Errorf("上传失败，状态码: %d, 响应: %s", response.StatusCode, string(body))
 	}
 	// fmt.Printf("分块上传成功，状态码: %d\n", response.StatusCode)
-	// 计算文件的 SHA-1 值
-	sha1Value := hash.Sum(nil)
-	sha1Hex := hex.EncodeToString(sha1Value)
-	return sha1Hex, nil
+	return nil
 }
 
 // UploadAndUpdateChunkPut 专门用于分块上传的方法
-func (s *NotionService) UploadAndUpdateChunkPut(reader io.Reader, size int64, name string, id string, up driver.UpdateProgress) (string, error) {
+func (s *NotionService) UploadAndUpdateChunkPut(reader io.Reader, size int64, name string, id string, up driver.UpdateProgress) error {
 	record := RecordInfo{
 		Table:   "block",
 		ID:      id,
@@ -725,22 +689,22 @@ func (s *NotionService) UploadAndUpdateChunkPut(reader io.Reader, size int64, na
 	// 1. 获取上传URL
 	uploadResponse, err := s.UploadChunkFilePut(name, size, record)
 	if err != nil {
-		return "", fmt.Errorf("获取上传URL失败: %v", err)
+		return fmt.Errorf("获取上传URL失败: %v", err)
 	}
 
 	// 2. 直接上传到S3
-	hash1, err := s.UploadChunkToS3Put(reader, size, uploadResponse, up)
+	err = s.UploadChunkToS3Put(reader, size, uploadResponse, up)
 	if err != nil {
-		return "", fmt.Errorf("上传到S3失败: %v", err)
+		return fmt.Errorf("上传到S3失败: %v", err)
 	}
 
 	// 3. 更新文件状态
 	err = s.UpdateFileStatus(record, name, uploadResponse.URL)
 	if err != nil {
-		return "", fmt.Errorf("更新文件状态失败: %v", err)
+		return fmt.Errorf("更新文件状态失败: %v", err)
 	}
 
-	return hash1, nil
+	return nil
 }
 
 // UploadChunkFilePut 为分块上传获取上传URL
