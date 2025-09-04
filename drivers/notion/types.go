@@ -34,23 +34,23 @@ type FileInfo struct {
 
 type Directory struct {
 	ID         int       `json:"id" gorm:"primaryKey"`
-	Name       string    `json:"name"`
-	ParentID   *int      `json:"parent_id" gorm:"index"`
-	DatabaseID string    `json:"database_id" gorm:"index"`
-	Deleted    bool      `json:"deleted" gorm:"default:false"`
+	Name       string    `json:"name" gorm:"index:idx_parent_name_deleted,priority:2"`
+	ParentID   *int      `json:"parent_id" gorm:"index:idx_parent_database_deleted,priority:1;index:idx_parent_name_deleted,priority:1"`
+	DatabaseID string    `json:"database_id" gorm:"index:idx_parent_database_deleted,priority:2"`
+	Deleted    bool      `json:"deleted" gorm:"default:false;index:idx_parent_database_deleted,priority:3;index:idx_parent_name_deleted,priority:3;index:idx_deleted"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 type File struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
-	Name         string    `json:"name"`
+	Name         string    `json:"name" gorm:"index:idx_directory_name_deleted,priority:2"`
 	Size         int64     `json:"size"`
 	NotionPageID string    `json:"notion_page_id"`
-	DirectoryID  int       `json:"directory_id" gorm:"index"`
+	DirectoryID  int       `json:"directory_id" gorm:"index:idx_directory_deleted,priority:1;index:idx_directory_name_deleted,priority:1"`
 	IsChunked    bool      `json:"is_chunked" gorm:"default:false"`
 	ChunkSize    int64     `json:"chunk_size" gorm:"default:0"`
-	Deleted      bool      `json:"deleted" gorm:"default:false"`
+	Deleted      bool      `json:"deleted" gorm:"default:false;index:idx_directory_deleted,priority:2;index:idx_directory_name_deleted,priority:3;index:idx_deleted"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
@@ -58,13 +58,13 @@ type File struct {
 // FileChunk 存储文件分块信息
 type FileChunk struct {
 	ID           int       `json:"id" gorm:"primaryKey"`
-	FileID       int       `json:"file_id" gorm:"index"`
-	ChunkIndex   int       `json:"chunk_index"`
+	FileID       int       `json:"file_id" gorm:"index:idx_file_deleted,priority:1;index:idx_file_chunk_index,priority:1"`
+	ChunkIndex   int       `json:"chunk_index" gorm:"index:idx_file_chunk_index,priority:2"`
 	ChunkSize    int64     `json:"chunk_size"`
 	StartOffset  int64     `json:"start_offset"`
 	EndOffset    int64     `json:"end_offset"`
 	NotionPageID string    `json:"notion_page_id"`
-	Deleted      bool      `json:"deleted" gorm:"default:false"`
+	Deleted      bool      `json:"deleted" gorm:"default:false;index:idx_file_deleted,priority:2;index:idx_deleted"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }

@@ -44,10 +44,27 @@ func (d *Notion) Init(ctx context.Context) error {
 	// 初始化数据库连接
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		d.DBUser, d.DBPass, d.DBHost, d.DBPort, d.DBName)
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+
+	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
+		// 启用预编译语句缓存，提高重复查询性能
+		PrepareStmt: true,
+		// 禁用默认事务，提高单条语句性能
+		SkipDefaultTransaction: true,
+	})
 	if err != nil {
 		return fmt.Errorf("连接数据库失败: %v", err)
 	}
+
+	// 配置连接池参数
+	sqlDB, err := db.DB()
+	if err != nil {
+		return fmt.Errorf("获取数据库实例失败: %v", err)
+	}
+
+	// 设置连接池参数
+	sqlDB.SetMaxIdleConns(10)           // 设置空闲连接池中连接的最大数量
+	sqlDB.SetMaxOpenConns(100)          // 设置打开数据库连接的最大数量
+	sqlDB.SetConnMaxLifetime(time.Hour) // 设置连接可复用的最大时间
 
 	// 自动迁移数据库表
 	err = db.AutoMigrate(&Directory{}, &File{}, &FileChunk{})
