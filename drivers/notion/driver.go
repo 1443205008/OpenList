@@ -468,6 +468,9 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 	// 上传文件到Notion
 	err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
 	if err != nil {
+		// 上传失败时，这里暂时不删除已创建的Notion页面
+		// 因为Notion API没有提供删除页面的简单方法
+		// TODO: 如果需要，可以在这里添加删除Notion页面的逻辑
 		return nil, fmt.Errorf("上传文件到Notion失败: %v", err)
 	}
 
@@ -481,6 +484,9 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 		ChunkSize:    0,
 	}
 	if err := d.db.Create(f).Error; err != nil {
+		// 保存文件信息失败时，这里暂时不删除已创建的Notion页面和已上传的文件
+		// 因为Notion API没有提供删除页面和文件的简单方法
+		// TODO: 如果需要，可以在这里添加删除Notion页面和文件的逻辑
 		return nil, fmt.Errorf("保存文件信息失败: %v", err)
 	}
 
@@ -527,11 +533,19 @@ func (d *Notion) putChunkedFile(ctx context.Context, fileName string, fileSize i
 	// 执行流式分块上传
 	chunks, err := streamUploader.Upload()
 	if err != nil {
+		// 分块上传失败时，清理已创建的主文件记录
+		if delErr := d.db.Delete(f).Error; delErr != nil {
+			return nil, fmt.Errorf("流式分块上传失败: %v, 清理主文件记录也失败: %v", err, delErr)
+		}
 		return nil, fmt.Errorf("流式分块上传失败: %v", err)
 	}
 
 	// 批量保存分块记录
 	if err := d.db.Create(&chunks).Error; err != nil {
+		// 保存分块记录失败时，清理主文件记录
+		if delErr := d.db.Delete(f).Error; delErr != nil {
+			return nil, fmt.Errorf("保存分块记录失败: %v, 清理主文件记录也失败: %v", err, delErr)
+		}
 		return nil, fmt.Errorf("保存分块记录失败: %v", err)
 	}
 
