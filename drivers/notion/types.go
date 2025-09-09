@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
@@ -13,13 +14,21 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/pkg/utils"
 )
 
+// PropertyCacheItem 缓存项结构
+type PropertyCacheItem struct {
+	Response  *PropertyResponse
+	ExpiresAt time.Time
+}
+
 type NotionService struct {
-	cookie     string
-	token      string
-	spaceID    string
-	databaseID string
-	filePageID string
-	userId     string
+	cookie        string
+	token         string
+	spaceID       string
+	databaseID    string
+	filePageID    string
+	userId        string
+	propertyCache map[string]*PropertyCacheItem // pageID+propertyID -> PropertyCacheItem
+	cacheMutex    sync.RWMutex                  // 保护缓存的读写锁
 }
 
 type FileInfo struct {

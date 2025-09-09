@@ -34,12 +34,13 @@ func NewNotionService(cookie, token, spaceID, databaseID string, filePageID stri
 	}
 	// 创建 NotionService 实例
 	return &NotionService{
-		cookie:     cookie,
-		token:      token,
-		spaceID:    spaceID,
-		databaseID: databaseID,
-		filePageID: filePageID,
-		userId:     userId,
+		cookie:        cookie,
+		token:         token,
+		spaceID:       spaceID,
+		databaseID:    databaseID,
+		filePageID:    filePageID,
+		userId:        userId,
+		propertyCache: make(map[string]*PropertyCacheItem),
 	}
 }
 
@@ -586,6 +587,21 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
+	cacheKey := fmt.Sprintf("%s:%s", pageID, propertyID)
+
+	// 先检查缓存
+	s.cacheMutex.RLock()
+	if item, exists := s.propertyCache[cacheKey]; exists {
+		// 检查是否过期
+		if time.Now().Before(item.ExpiresAt) {
+			s.cacheMutex.RUnlock()
+			return item.Response, nil
+		}
+		// 缓存过期，清理
+		delete(s.propertyCache, cacheKey)
+	}
+	s.cacheMutex.RUnlock()
+
 	//propertyID 转义
 	propertyIDNew := url.PathEscape(propertyID)
 	url := fmt.Sprintf("https://api.notion.com/v1/pages/%s/properties/%s", pageID, propertyIDNew)
@@ -615,6 +631,14 @@ func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*Prop
 	if err := json.NewDecoder(resp.Body).Decode(&propertyResponse); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %v", err)
 	}
+
+	// 缓存结果，设置过期时间为1小时
+	s.cacheMutex.Lock()
+	s.propertyCache[cacheKey] = &PropertyCacheItem{
+		Response:  &propertyResponse,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}
+	s.cacheMutex.Unlock()
 
 	return &propertyResponse, nil
 }
@@ -750,6 +774,42 @@ func (s *NotionService) UploadChunkFilePut(name string, size int64, recordInfo R
 	}
 
 	return &uploadResponse, nil
+}
+
+// ClearExpiredCache 清理过期的缓存项
+func (s *NotionService) ClearExpiredCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	now := time.Now()
+	for key, item := range s.propertyCache {
+		if now.After(item.ExpiresAt) {
+			delete(s.propertyCache, key)
+		}
+	}
+}
+
+// ClearAllCache 清理所有缓存项
+func (s *NotionService) ClearAllCache() {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+
+	s.propertyCache = make(map[string]*PropertyCacheItem)
+}
+
+// GetCacheStats 获取缓存统计信息
+func (s *NotionService) GetCacheStats() (total int, expired int) {
+	s.cacheMutex.RLock()
+	defer s.cacheMutex.RUnlock()
+
+	now := time.Now()
+	total = len(s.propertyCache)
+	for _, item := range s.propertyCache {
+		if now.After(item.ExpiresAt) {
+			expired++
+		}
+	}
+	return total, expired
 }
 
 // do others that not defined in Driver interface
