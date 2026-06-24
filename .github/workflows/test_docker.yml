@@ -164,7 +164,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.ci
+          file: Dockerfile
           push: ${{ env.IMAGE_PUSH == 'true' }}
           build-args: ${{ matrix.build_arg }}
           tags: ${{ steps.meta.outputs.tags }}
@@ -232,7 +232,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile.ci
+          file: Dockerfile
           push: ${{ env.IMAGE_PUSH == 'true' }}
           build-args: ${{ matrix.build_arg }}
           tags: ${{ steps.meta.outputs.tags }}

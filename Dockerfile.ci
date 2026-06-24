@@ -1,3 +1,4 @@
+ARG TARGETPLATFORM=linux/amd64
 FROM docker.io/library/alpine:edge
 
 ARG TARGETPLATFORM
@@ -24,7 +25,7 @@ RUN apk update && \
         /opt/aria2/.aria2/tracker.sh ; \
     rm -rf /var/cache/apk/*
 
-COPY --chmod=755 /build/${TARGETPLATFORM}/openlist ./
+COPY --chmod=755 build/${TARGETPLATFORM}/openlist ./
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 RUN /entrypoint.sh version
 

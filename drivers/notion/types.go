@@ -140,6 +140,28 @@ type UploadFields struct {
 	XAmzSignature     string `json:"X-Amz-Signature"`
 }
 
+type FileUploadCreateRequest struct {
+	Filename      string `json:"filename,omitempty"`
+	ContentType   string `json:"content_type,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	NumberOfParts int    `json:"number_of_parts,omitempty"`
+}
+
+type FileUploadResponse struct {
+	Object         string      `json:"object"`
+	ID             string      `json:"id"`
+	CreatedTime    string      `json:"created_time"`
+	LastEditedTime string      `json:"last_edited_time"`
+	ExpiryTime     string      `json:"expiry_time"`
+	UploadURL      string      `json:"upload_url"`
+	Status         string      `json:"status"`
+	Mode           string      `json:"mode"`
+	Filename       string      `json:"filename"`
+	ContentType    string      `json:"content_type"`
+	ContentLength  interface{} `json:"content_length"`
+	NumberOfParts  int         `json:"number_of_parts"`
+}
+
 type UpdateFileStatusRequest struct {
 	RequestID    string        `json:"requestId"`
 	Transactions []Transaction `json:"transactions"`

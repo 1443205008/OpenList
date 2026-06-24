@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -21,8 +23,17 @@ import (
 )
 
 const (
-	NotionAPIBaseURL = "https://www.notion.so/api/v3"
-	S3BaseURL        = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
+	NotionAPIBaseURL         = "https://www.notion.so/api/v3"
+	NotionOfficialAPIBaseURL = "https://api.notion.com/v1"
+	NotionLegacyAPIVersion   = "2022-06-28"
+	NotionFileUploadVersion  = "2026-03-11"
+	S3BaseURL                = "https://prod-files-secure.s3.us-west-2.amazonaws.com/"
+
+	fileUploadModeSinglePart        = "single_part"
+	fileUploadModeMultiPart         = "multi_part"
+	officialSinglePartLimit   int64 = 20 * 1024 * 1024
+	officialMultipartPartSize int64 = 10 * 1024 * 1024
+	uploadMethodOfficial            = "official"
 )
 
 func NewNotionService(cookie, token, spaceID, databaseID string, filePageID string) *NotionService {
@@ -93,10 +104,7 @@ func (s *NotionService) CreateDatabasePage(title string) (string, error) {
 		return "", fmt.Errorf("创建请求失败: %v", err)
 	}
 
-	// 设置 Notion API 特定的请求头
-	req.Header.Set("Authorization", "Bearer "+s.token)
-	req.Header.Set("Notion-Version", "2022-06-28")
-	req.Header.Set("Content-Type", "application/json")
+	s.setOfficialAPIHeaders(req, "application/json", NotionLegacyAPIVersion)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)
@@ -175,6 +183,233 @@ func (s *NotionService) UploadAndUpdateFilePut(file model.FileStreamer, id strin
 		return fmt.Errorf("更新文件状态失败: %v", err)
 	}
 
+	return nil
+}
+
+func (s *NotionService) UploadAndUpdateFileOfficial(ctx context.Context, file model.FileStreamer, id string, up driver.UpdateProgress) error {
+	uploadID, err := s.UploadFileOfficial(ctx, file, up)
+	if err != nil {
+		return fmt.Errorf("上传文件失败: %v", err)
+	}
+
+	if err := s.AttachFileUploadToPage(ctx, id, filepath.Base(file.GetName()), uploadID); err != nil {
+		return fmt.Errorf("更新文件属性失败: %v", err)
+	}
+
+	return nil
+}
+
+func (s *NotionService) UploadFileOfficial(ctx context.Context, file model.FileStreamer, up driver.UpdateProgress) (string, error) {
+	fileName := filepath.Base(file.GetName())
+	contentType := file.GetMimetype()
+	if contentType == "" {
+		contentType = GetContentType(fileName)
+	}
+
+	if file.GetSize() <= officialSinglePartLimit {
+		createResp, err := s.CreateFileUpload(ctx, FileUploadCreateRequest{
+			Filename:    fileName,
+			ContentType: contentType,
+			Mode:        fileUploadModeSinglePart,
+		})
+		if err != nil {
+			return "", err
+		}
+
+		progress := &notionUploadProgress{total: file.GetSize(), up: up}
+		if err := s.SendFileUpload(ctx, createResp.ID, 0, fileName, contentType, file.GetSize(), file, progress); err != nil {
+			return "", err
+		}
+		return createResp.ID, nil
+	}
+
+	partCount := int((file.GetSize() + officialMultipartPartSize - 1) / officialMultipartPartSize)
+	createResp, err := s.CreateFileUpload(ctx, FileUploadCreateRequest{
+		Filename:      fileName,
+		ContentType:   contentType,
+		Mode:          fileUploadModeMultiPart,
+		NumberOfParts: partCount,
+	})
+	if err != nil {
+		return "", err
+	}
+
+	progress := &notionUploadProgress{total: file.GetSize(), up: up}
+	for partNumber := 1; partNumber <= partCount; partNumber++ {
+		partSize := officialMultipartPartSize
+		remaining := file.GetSize() - int64(partNumber-1)*officialMultipartPartSize
+		if remaining < partSize {
+			partSize = remaining
+		}
+		if err := s.SendFileUpload(ctx, createResp.ID, partNumber, fileName, contentType, partSize, io.LimitReader(file, partSize), progress); err != nil {
+			return "", err
+		}
+	}
+
+	if _, err := s.CompleteFileUpload(ctx, createResp.ID); err != nil {
+		return "", err
+	}
+	return createResp.ID, nil
+}
+
+func (s *NotionService) CreateFileUpload(ctx context.Context, reqBody FileUploadCreateRequest) (*FileUploadResponse, error) {
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, NotionOfficialAPIBaseURL+"/file_uploads", bytes.NewBuffer(jsonData))
+	if err != nil {
+		return nil, err
+	}
+	s.setOfficialAPIHeaders(req, "application/json", NotionFileUploadVersion)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("创建文件上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	var uploadResp FileUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
+		return nil, err
+	}
+	return &uploadResp, nil
+}
+
+func (s *NotionService) SendFileUpload(ctx context.Context, uploadID string, partNumber int, fileName, contentType string, size int64, reader io.Reader, progress *notionUploadProgress) error {
+	pr, pw := io.Pipe()
+	writer := multipart.NewWriter(pw)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/file_uploads/%s/send", NotionOfficialAPIBaseURL, uploadID), pr)
+	if err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
+		return err
+	}
+	s.setOfficialAPIHeaders(req, writer.FormDataContentType(), NotionFileUploadVersion)
+
+	go func() {
+		defer pw.Close()
+
+		if partNumber > 0 {
+			if err := writer.WriteField("part_number", strconv.Itoa(partNumber)); err != nil {
+				pw.CloseWithError(err)
+				return
+			}
+		}
+
+		header := make(textproto.MIMEHeader)
+		header.Set("Content-Disposition", mime.FormatMediaType("form-data", map[string]string{
+			"name":     "file",
+			"filename": fileName,
+		}))
+		header.Set("Content-Type", contentType)
+
+		part, err := writer.CreatePart(header)
+		if err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+
+		uploadReader := driver.NewLimitedUploadStream(ctx, reader)
+		if progress != nil {
+			uploadReader.Reader = io.TeeReader(uploadReader.Reader, progress)
+		}
+		if _, err := io.Copy(part, io.LimitReader(uploadReader, size)); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+		if err := writer.Close(); err != nil {
+			pw.CloseWithError(err)
+			return
+		}
+	}()
+
+	resp, err := (&http.Client{Timeout: 0}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("发送文件上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (s *NotionService) CompleteFileUpload(ctx context.Context, uploadID string) (*FileUploadResponse, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/file_uploads/%s/complete", NotionOfficialAPIBaseURL, uploadID), nil)
+	if err != nil {
+		return nil, err
+	}
+	s.setOfficialAPIHeaders(req, "application/json", NotionFileUploadVersion)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("完成文件上传失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	var uploadResp FileUploadResponse
+	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
+		return nil, err
+	}
+	return &uploadResp, nil
+}
+
+func (s *NotionService) AttachFileUploadToPage(ctx context.Context, pageID, fileName, uploadID string) error {
+	reqBody := map[string]interface{}{
+		"properties": map[string]interface{}{
+			s.filePageID: map[string]interface{}{
+				"type": "files",
+				"files": []map[string]interface{}{
+					{
+						"name": fileName,
+						"type": "file_upload",
+						"file_upload": map[string]string{
+							"id": uploadID,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	jsonData, err := json.Marshal(reqBody)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPatch, fmt.Sprintf("%s/pages/%s", NotionOfficialAPIBaseURL, pageID), bytes.NewBuffer(jsonData))
+	if err != nil {
+		return err
+	}
+	s.setOfficialAPIHeaders(req, "application/json", NotionFileUploadVersion)
+
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("绑定文件上传到页面失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
+	}
+
+	s.invalidatePropertyCache(pageID, s.filePageID)
 	return nil
 }
 
@@ -562,6 +797,7 @@ func (s *NotionService) UpdateFileStatus(record RecordInfo, fileName string, fil
 		return fmt.Errorf("更新文件状态失败，状态码: %d, 响应: %s", resp.StatusCode, string(body))
 	}
 
+	s.invalidatePropertyCache(record.ID, s.filePageID)
 	// fmt.Printf("文件状态更新成功，状态码: %d\n", resp.StatusCode)
 	return nil
 }
@@ -584,6 +820,40 @@ func (s *NotionService) setPutCommonHeaders(req *http.Request) {
 	req.Header.Set("Cookie", s.cookie)
 	req.Header.Set("X-Notion-Active-User-Header", s.userId)
 	req.Header.Set("X-Notion-Space-Id", s.spaceID)
+}
+
+func (s *NotionService) setOfficialAPIHeaders(req *http.Request, contentType string, version string) {
+	req.Header.Set("Authorization", "Bearer "+s.token)
+	req.Header.Set("Notion-Version", version)
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+}
+
+func (s *NotionService) invalidatePropertyCache(pageID, propertyID string) {
+	s.cacheMutex.Lock()
+	defer s.cacheMutex.Unlock()
+	delete(s.propertyCache, fmt.Sprintf("%s:%s", pageID, propertyID))
+}
+
+type notionUploadProgress struct {
+	total int64
+	done  int64
+	up    driver.UpdateProgress
+}
+
+func (p *notionUploadProgress) Write(b []byte) (int, error) {
+	n := len(b)
+	if p == nil || p.up == nil || p.total <= 0 {
+		return n, nil
+	}
+	p.done += int64(n)
+	percentage := float64(p.done) / float64(p.total) * 100
+	if percentage > 100 {
+		percentage = 100
+	}
+	p.up(percentage)
+	return n, nil
 }
 
 func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*PropertyResponse, error) {
@@ -611,9 +881,7 @@ func (s *NotionService) GetPageProperty(pageID string, propertyID string) (*Prop
 		return nil, fmt.Errorf("创建请求失败: %v", err)
 	}
 
-	req.Header.Set("Authorization", "Bearer "+s.token)
-	req.Header.Set("Notion-Version", "2022-06-28")
-	req.Header.Set("Content-Type", "application/json")
+	s.setOfficialAPIHeaders(req, "application/json", NotionLegacyAPIVersion)
 
 	client := &http.Client{}
 	resp, err := client.Do(req)

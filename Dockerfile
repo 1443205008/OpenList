@@ -1,14 +1,7 @@
-FROM docker.io/library/alpine:edge AS builder
-LABEL stage=go-builder
-WORKDIR /app/
-RUN apk add --no-cache bash curl jq gcc git go musl-dev
-COPY go.mod go.sum ./
-RUN go mod download
-COPY ./ ./
-RUN bash build.sh release docker
+ARG TARGETPLATFORM=linux/amd64
+FROM docker.io/library/alpine:edge
 
-FROM alpine:edge
-
+ARG TARGETPLATFORM
 ARG INSTALL_FFMPEG=false
 ARG INSTALL_ARIA2=false
 LABEL MAINTAINER="OpenList"
@@ -32,7 +25,7 @@ RUN apk update && \
         /opt/aria2/.aria2/tracker.sh ; \
     rm -rf /var/cache/apk/*
 
-COPY --chmod=755 --from=builder /app/bin/openlist ./
+COPY --chmod=755 build/${TARGETPLATFORM}/openlist ./
 COPY --chmod=755 entrypoint.sh /entrypoint.sh
 RUN /entrypoint.sh version
 

@@ -12,6 +12,7 @@ type Addition struct {
 	NotionSpaceID    string `json:"notion_space_id" required:"true"`
 	NotionDatabaseID string `json:"notion_database_id" required:"true"`
 	NotionFilePageID string `json:"notion_file_page_id" required:"true"`
+	UploadMethod     string `json:"upload_method" type:"select" options:"legacy,official" default:"legacy" help:"legacy uses Notion internal upload API; official uses Notion File Upload API"`
 	DBUser           string `json:"db_user" default:"root"`
 	DBPass           string `json:"db_pass" default:"123456"`
 	DBHost           string `json:"db_host" default:"localhost"`

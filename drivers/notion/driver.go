@@ -483,7 +483,11 @@ func (d *Notion) putSingleFile(ctx context.Context, fileName string, fileSize in
 	}
 
 	// 上传文件到Notion
-	err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
+	if d.UploadMethod == uploadMethodOfficial {
+		err = d.notionClient.UploadAndUpdateFileOfficial(ctx, file, pageID, up)
+	} else {
+		err = d.notionClient.UploadAndUpdateFilePut(file, pageID, up)
+	}
 	if err != nil {
 		// 上传失败时，这里暂时不删除已创建的Notion页面
 		// 因为Notion API没有提供删除页面的简单方法
